@@ -60,3 +60,7 @@ Provide the analysis:
 If you added indicators the user didn't ask for, remove them:
 - `chart_manage_indicator` with action "remove" and the entity_id
 - `draw_clear` to remove all drawings if they were temporary
+
+## Acting on the analysis (optional)
+
+If the user wants to **trade** the setup (not just analyze it), hand off to the `chart-to-binance-trade` skill — it turns the levels/bias from this analysis into a risk-sized Binance order or ladder with a protective stop. (Binance execution is separate from TradingView and moves real funds — always dry-run and confirm first.)
