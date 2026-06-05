@@ -1,0 +1,308 @@
+import { z } from 'zod';
+import { jsonResult } from './_format.js';
+import * as core from '../core/binance.js';
+
+const market = z.enum(['spot', 'futures', 'coinm', 'spot-testnet', 'futures-testnet', 'coinm-testnet'])
+  .default('futures').describe('Binance market. futures = USD-M; coinm = COIN-M (quantity is in CONTRACTS). Mainnet = REAL funds; *-testnet = paper.');
+const symbol = z.string().describe('Trading symbol, e.g. "BTCUSDT" or "BTCUSDC"');
+const account = z.string().default('1').describe('Which API key set to use: "1" (primary, BINANCE_API_KEY) or "2"/"3"… (BINANCE_API_KEY_2…). For trade mirroring.');
+const accounts = z.array(z.string()).default(['1', '2']).describe('Account ids to mirror across; the first is the base/source-of-truth that drives sizing. Default ["1","2"].');
+const marginAsset = z.string().default('USDT').describe('Asset whose balance ratio scales the mirrored quantity (default USDT).');
+
+const wrap = (fn) => async (args) => {
+  try { return jsonResult(await fn(args)); }
+  catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+};
+
+export function registerBinanceTools(server) {
+  // ---- Reads ----
+  server.tool('binance_get_balance', 'Get Binance account balances (non-zero assets)', {
+    market, account,
+  }, wrap(core.getBalance));
+
+  server.tool('binance_get_positions', 'Get open futures positions (futures only)', {
+    market, symbol: symbol.optional(), account,
+  }, wrap(core.getPositions));
+
+  server.tool('binance_get_account_summary', 'One-call futures account health: wallet/margin balance, unrealized PnL, available margin, margin ratio (futures only)', {
+    market, account,
+  }, wrap(core.getAccountSummary));
+
+  server.tool('binance_get_account_snapshot', 'Compact monitoring snapshot: margin ratio, available, unrealized PnL, open-order counts, and per-position side/qty/entry/mark/uPnl (futures only)', {
+    market, symbol: symbol.optional(), account,
+  }, wrap(core.getAccountSnapshot));
+
+  server.tool('binance_calc_position_size', 'Risk-based position sizing: from entry, stop and a risk budget (riskAmount $ or riskPct of balance) compute quantity, notional and required margin at leverage. Warns if it breaches the 3x rule or available margin.', {
+    market, symbol: symbol.optional(),
+    entry: z.coerce.number().describe('Entry price'),
+    stop: z.coerce.number().describe('Stop-loss price'),
+    leverage: z.coerce.number().default(3).describe('Leverage (default 3)'),
+    riskAmount: z.coerce.number().optional().describe('Risk budget in quote currency ($)'),
+    riskPct: z.coerce.number().optional().describe('Risk budget as % of balance (e.g. 1 = 1%)'),
+    balance: z.coerce.number().optional().describe('Balance to size against (fetched from the account if omitted)'),
+    round: z.boolean().default(true),
+    account,
+  }, wrap(core.calcPositionSize));
+
+  server.tool('binance_get_risk_report', 'Portfolio risk report: per-position notional, liquidation price + distance-to-liq %, % of equity, plus gross exposure, exposure/equity and margin ratio (futures only)', {
+    market, account,
+  }, wrap(core.getRiskReport));
+
+  server.tool('binance_get_open_orders', 'List open orders, optionally filtered by symbol', {
+    market, symbol: symbol.optional(), account,
+  }, wrap(core.getOpenOrders));
+
+  server.tool('binance_get_order', 'Get a single order by orderId or origClientOrderId', {
+    market, symbol,
+    orderId: z.union([z.string(), z.number()]).optional(),
+    origClientOrderId: z.string().optional(),
+    account,
+  }, wrap(core.getOrder));
+
+  server.tool('binance_get_ticker', 'Latest price for a symbol (public)', {
+    market, symbol,
+  }, wrap(core.getTicker));
+
+  server.tool('binance_get_klines', 'Candlesticks (OHLCV) for a symbol (public) — pulls candles for the exact Binance contract, independent of any TradingView chart', {
+    market, symbol,
+    interval: z.enum(['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']).default('1h'),
+    startTime: z.coerce.number().optional().describe('Start time (ms epoch)'),
+    endTime: z.coerce.number().optional().describe('End time (ms epoch)'),
+    limit: z.coerce.number().optional().describe('Bars to return (spot max 1000, futures max 1500; default 500)'),
+  }, wrap(core.getKlines));
+
+  server.tool('binance_get_24hr_ticker', '24-hour rolling price-change statistics for a symbol (public)', {
+    market, symbol,
+  }, wrap(core.get24hrTicker));
+
+  server.tool('binance_get_book_ticker', 'Best bid/ask (top of book) for a symbol, with computed spread (public)', {
+    market, symbol,
+  }, wrap(core.getBookTicker));
+
+  server.tool('binance_get_avg_price', 'Current average price over a short window (spot-only; ~5-min avg)', {
+    market, symbol,
+  }, wrap(core.getAvgPrice));
+
+  server.tool('binance_get_funding_rate', 'Perpetual funding rate (public): current premium-index snapshot, or history:true for recent funding payments', {
+    market, symbol,
+    history: z.boolean().default(false).describe('true = recent funding-rate history instead of the current snapshot'),
+    limit: z.coerce.number().optional().describe('History rows (default 10, max 1000)'),
+  }, wrap(core.getFundingRate));
+
+  server.tool('binance_get_rolling_window_ticker', 'Rolling-window price-change stats with a custom window (spot-only; windowSize e.g. "1d", "4h")', {
+    market, symbol, windowSize: z.string().default('1d').describe('Window, e.g. "1m"-"59m", "1h"-"23h", "1d"-"7d"'),
+  }, wrap(core.getRollingWindowTicker));
+
+  server.tool('binance_get_order_book', 'Order book depth (public)', {
+    market, symbol, limit: z.coerce.number().optional().describe('Levels per side (default 20, max 1000)'),
+  }, wrap(core.getOrderBook));
+
+  server.tool('binance_get_symbol_info', 'Trading filters: tickSize, stepSize, minNotional, precision — use to round price/qty so orders are not rejected', {
+    market, symbol,
+  }, wrap(core.getSymbolInfo));
+
+  server.tool('binance_get_position_mode', 'Whether the futures account is in Hedge Mode (positionSide required on orders) or one-way', {
+    market, account,
+  }, wrap(core.getPositionMode));
+
+  server.tool('binance_set_position_mode', 'Switch the futures account between Hedge Mode (hedgeMode:true) and one-way (false). Idempotent.', {
+    market, hedgeMode: z.boolean().describe('true = Hedge Mode (LONG/SHORT positions), false = one-way'), account,
+  }, wrap(core.setPositionMode));
+
+  server.tool('binance_get_commission_rate', 'Maker/taker commission rate for a symbol — confirms a 0 maker-fee pair', {
+    market, symbol, account,
+  }, wrap(core.getCommissionRate));
+
+  server.tool('binance_get_server_time', 'Local-vs-Binance clock offset (signed requests auto-correct on -1021 skew errors)', {
+    market,
+  }, wrap(core.getServerTime));
+
+  server.tool('binance_get_recent_trades', 'Recent public trades for a symbol', {
+    market, symbol, limit: z.coerce.number().optional(),
+  }, wrap(core.getRecentTrades));
+
+  server.tool('binance_get_account_trades', "User's account trades for a symbol (signed)", {
+    market, symbol, fromId: z.union([z.string(), z.number()]).optional(), limit: z.coerce.number().optional(), account,
+  }, wrap(core.getAccountTrades));
+
+  server.tool('binance_get_order_history', 'All orders for a symbol — open, filled, and cancelled (signed)', {
+    market, symbol,
+    orderId: z.union([z.string(), z.number()]).optional(),
+    startTime: z.coerce.number().optional(), endTime: z.coerce.number().optional(),
+    limit: z.coerce.number().optional().describe('Max orders (default 500, max 1000)'),
+    account,
+  }, wrap(core.getOrderHistory));
+
+  server.tool('binance_get_income', 'Futures income history (signed): realized PnL, funding fees, commissions, etc., with a per-type summary', {
+    market, symbol: symbol.optional(),
+    incomeType: z.string().optional().describe('Filter: REALIZED_PNL, FUNDING_FEE, COMMISSION, TRANSFER, …'),
+    startTime: z.coerce.number().optional(), endTime: z.coerce.number().optional(),
+    limit: z.coerce.number().optional().describe('Max rows (default 100, max 1000)'),
+    account,
+  }, wrap(core.getIncome));
+
+  // ---- Config (futures) ----
+  server.tool('binance_set_leverage', 'Set leverage for a futures symbol (1-125)', {
+    market, symbol, leverage: z.coerce.number().describe('Integer leverage 1-125'), account,
+  }, wrap(core.setLeverage));
+
+  server.tool('binance_set_margin_type', 'Set margin type ISOLATED or CROSSED for a futures symbol', {
+    market, symbol, marginType: z.enum(['ISOLATED', 'CROSSED']), account,
+  }, wrap(core.setMarginType));
+
+  server.tool('binance_get_leverage_brackets', 'Leverage/margin tiers (max leverage + maintenance-margin steps per notional) for a symbol (futures only)', {
+    market, symbol: symbol.optional(), account,
+  }, wrap(core.getLeverageBrackets));
+
+  // ---- Money-moving (DRY-RUN unless confirm:true) ----
+  server.tool('binance_place_order',
+    'Place an order. DRY-RUN preview unless confirm:true. Supports MARKET/LIMIT and stop/TP types (STOP, STOP_MARKET, TAKE_PROFIT, TAKE_PROFIT_MARKET).', {
+    market, symbol,
+    side: z.enum(['BUY', 'SELL']),
+    type: z.enum(['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET']).default('MARKET'),
+    quantity: z.coerce.number().optional().describe('Base-asset quantity (omit with closePosition)'),
+    price: z.coerce.number().optional().describe('Limit price (LIMIT/STOP/TAKE_PROFIT)'),
+    stopPrice: z.coerce.number().optional().describe('Trigger price (required for stop/TP types)'),
+    closePosition: z.boolean().optional().describe('Futures stop/TP that closes the whole position'),
+    reduceOnly: z.boolean().optional().describe('Futures: close-only order'),
+    postOnly: z.boolean().default(true).describe('Maker-only, ENFORCED by default: futures→GTX, spot→LIMIT_MAKER. Set false for a normal taker-capable limit.'),
+    allowTaker: z.boolean().default(false).describe('Required to place taker-only types (MARKET/STOP_MARKET/TAKE_PROFIT_MARKET) — they cross the book and cannot be post-only.'),
+    timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'GTX']).optional().describe('Post-only forces GTX; otherwise defaults GTC.'),
+    positionSide: z.enum(['LONG', 'SHORT', 'BOTH']).optional().describe('Required in Hedge Mode: which position the order targets (LONG/SHORT).'),
+    round: z.boolean().default(true).describe('Snap price/quantity to the symbol tick/step size so the order is not rejected for precision.'),
+    newClientOrderId: z.string().optional(),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to actually place the order (real funds on mainnet)'),
+  }, wrap(core.placeOrder));
+
+  server.tool('binance_place_bracket',
+    'Place entry + protective stop + take-profit(s) in one shot (futures). DRY-RUN unless confirm:true. side is the POSITION direction; stop/TPs go on the closing side. Set includeEntry:false to protect a position you already hold.', {
+    market, symbol,
+    side: z.enum(['BUY', 'SELL']).describe('Position direction: BUY=long, SELL=short'),
+    quantity: z.coerce.number().describe('Position size in base asset'),
+    includeEntry: z.boolean().default(true).describe('Place the entry leg too (false = attach stop/TPs to existing position)'),
+    entryType: z.enum(['MARKET', 'LIMIT']).default('MARKET'),
+    entryPrice: z.coerce.number().optional().describe('Required for LIMIT entry'),
+    postOnly: z.boolean().default(true).describe('Maker-only entry (LIMIT only): timeInForce GTX. Enforced by default.'),
+    allowTaker: z.boolean().default(false).describe('Required: a bracket with a stop / market-TP / MARKET entry has taker legs that cannot be post-only.'),
+    stopPrice: z.coerce.number().optional().describe('Protective stop trigger'),
+    takeProfits: z.array(z.object({
+      price: z.coerce.number(),
+      quantity: z.coerce.number().optional().describe('Per-TP size; required when there is more than one TP'),
+    })).optional().describe('One or more take-profit legs'),
+    hedge: z.boolean().optional().describe('Force Hedge Mode positionSide on every leg. Omit to auto-detect when confirm:true.'),
+    round: z.boolean().default(true).describe('Snap leg prices/quantities to the symbol tick/step size.'),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to actually place the bracket (real funds on mainnet)'),
+  }, wrap(core.placeBracket));
+
+  server.tool('binance_modify_order',
+    'Amend a resting futures LIMIT order price/quantity in place (avoids cancel+replace). DRY-RUN unless confirm:true. Binance requires side + both price and quantity.', {
+    market, symbol,
+    orderId: z.union([z.string(), z.number()]).optional(),
+    origClientOrderId: z.string().optional(),
+    side: z.enum(['BUY', 'SELL']).describe('Must match the original order side'),
+    quantity: z.coerce.number().describe('New quantity (required by Binance modify)'),
+    price: z.coerce.number().describe('New limit price (required by Binance modify)'),
+    round: z.boolean().default(true).describe('Snap price/quantity to the symbol tick/step size.'),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to actually modify the order (real funds on mainnet)'),
+  }, wrap(core.modifyOrder));
+
+  server.tool('binance_place_ladder',
+    'Scale into a position with a ladder of post-only LIMIT rungs evenly spaced across [lo, hi], optionally seeded with a MARKET order and guarded by a closePosition stop. DRY-RUN unless confirm:true. Pass exactly one of totalNotional or totalQuantity.', {
+    market, symbol,
+    side: z.enum(['BUY', 'SELL']),
+    lo: z.coerce.number().describe('Bottom of the entry range'),
+    hi: z.coerce.number().describe('Top of the entry range'),
+    count: z.coerce.number().default(10).describe('Number of rungs'),
+    totalNotional: z.coerce.number().optional().describe('Total $ notional split evenly across rungs'),
+    totalQuantity: z.coerce.number().optional().describe('Total base qty split evenly across rungs'),
+    positionSide: z.enum(['LONG', 'SHORT', 'BOTH']).optional().describe('Required in Hedge Mode'),
+    seedQuantity: z.coerce.number().optional().describe('Optional MARKET seed to open the position immediately'),
+    stop: z.coerce.number().optional().describe('Optional closePosition STOP_MARKET trigger price'),
+    postOnly: z.boolean().default(true).describe('Rungs are maker-only GTX by default'),
+    round: z.boolean().default(true),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to place the ladder (real funds on mainnet)'),
+  }, wrap(core.placeLadder));
+
+  server.tool('binance_ensure_protective_stop',
+    'Idempotently ensure an open futures position has a closePosition stop. If one already rests, does nothing; otherwise places a STOP_MARKET closePosition at `stop`. DRY-RUN unless confirm:true.', {
+    market, symbol,
+    stop: z.coerce.number().describe('Stop trigger price'),
+    positionSide: z.enum(['LONG', 'SHORT', 'BOTH']).optional().describe('Defaults to the open position side'),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to actually place the stop'),
+  }, wrap(core.ensureProtectiveStop));
+
+  server.tool('binance_cancel_order', 'Cancel a single open order by orderId or origClientOrderId', {
+    market, symbol,
+    orderId: z.union([z.string(), z.number()]).optional(),
+    origClientOrderId: z.string().optional(),
+    account,
+  }, wrap(core.cancelOrder));
+
+  server.tool('binance_cancel_all_orders', 'Cancel ALL open orders for a symbol (regular + conditional/algo). DRY-RUN unless confirm:true.', {
+    market, symbol, account, confirm: z.boolean().default(false),
+  }, wrap(core.cancelAllOrders));
+
+  // ---- Multi-account trade mirroring (DRY-RUN unless confirm:true) ----
+  server.tool('binance_mirror_order',
+    'Mirror one order across multiple accounts, sized by balance ratio. The base account (accounts[0]) places `quantity`; each other places quantity × (its balance / base balance), snapped to step size. DRY-RUN unless confirm:true. Same order args as binance_place_order. On confirm the base is placed first; if it fails the mirrors are skipped. Leverage/margin-type are NOT mirrored.', {
+    market, symbol,
+    side: z.enum(['BUY', 'SELL']),
+    type: z.enum(['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET']).default('MARKET'),
+    quantity: z.coerce.number().describe('Base-asset quantity for the base account; mirrors are scaled from this'),
+    price: z.coerce.number().optional().describe('Limit price (LIMIT/STOP/TAKE_PROFIT)'),
+    stopPrice: z.coerce.number().optional().describe('Trigger price (required for stop/TP types)'),
+    reduceOnly: z.boolean().optional(),
+    postOnly: z.boolean().default(true).describe('Maker-only, enforced by default (futures→GTX, spot→LIMIT_MAKER).'),
+    allowTaker: z.boolean().default(false).describe('Required for taker-only types (MARKET/STOP_MARKET/TAKE_PROFIT_MARKET).'),
+    timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'GTX']).optional(),
+    positionSide: z.enum(['LONG', 'SHORT', 'BOTH']).optional().describe('Required in Hedge Mode (applied to every account).'),
+    round: z.boolean().default(true),
+    accounts, marginAsset,
+    confirm: z.boolean().default(false).describe('Must be true to actually place orders on all accounts (real funds on mainnet)'),
+  }, wrap(core.mirrorOrder));
+
+  server.tool('binance_mirror_bracket',
+    'Mirror a full bracket (entry + stop + take-profit(s)) across multiple accounts, sized by balance ratio. Same args as binance_place_bracket plus accounts/marginAsset. DRY-RUN unless confirm:true. Per-TP quantities are scaled too. Leverage/margin-type are NOT mirrored.', {
+    market, symbol,
+    side: z.enum(['BUY', 'SELL']).describe('Position direction: BUY=long, SELL=short'),
+    quantity: z.coerce.number().describe('Base-account position size; mirrors are scaled from this'),
+    includeEntry: z.boolean().default(true),
+    entryType: z.enum(['MARKET', 'LIMIT']).default('MARKET'),
+    entryPrice: z.coerce.number().optional(),
+    postOnly: z.boolean().default(true),
+    allowTaker: z.boolean().default(false),
+    stopPrice: z.coerce.number().optional(),
+    takeProfits: z.array(z.object({
+      price: z.coerce.number(),
+      quantity: z.coerce.number().optional(),
+    })).optional(),
+    hedge: z.boolean().optional(),
+    round: z.boolean().default(true),
+    accounts, marginAsset,
+    confirm: z.boolean().default(false).describe('Must be true to actually place the brackets on all accounts (real funds on mainnet)'),
+  }, wrap(core.mirrorBracket));
+
+  server.tool('binance_cancel_algo_order', 'Cancel a conditional (stop/TP) algo order by algoId — USD-M futures', {
+    market, algoId: z.union([z.string(), z.number()]).describe('Algo order id (from binance_get_open_orders algoOrders[].algoId)'), account,
+  }, wrap(core.cancelAlgoOrder));
+
+  const wallet = z.enum(['spot', 'futures', 'usdm', 'coinm']);
+  server.tool('binance_transfer',
+    'Move an asset between wallets via Universal Transfer (e.g. USD-M futures → spot). DRY-RUN unless confirm:true. Requires the API key to have "Permits Universal Transfer" enabled.', {
+    asset: z.string().describe('Asset to move, e.g. "USDC"'),
+    amount: z.coerce.number().describe('Amount to transfer'),
+    from: wallet.default('futures').describe('Source wallet'),
+    to: wallet.default('spot').describe('Destination wallet'),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to actually move funds (real)'),
+  }, wrap(core.transfer));
+
+  server.tool('binance_get_transfer_history', 'Recent universal transfers for a wallet pair', {
+    from: wallet.default('futures'), to: wallet.default('spot'), size: z.coerce.number().optional(), account,
+  }, wrap(core.getTransferHistory));
+}

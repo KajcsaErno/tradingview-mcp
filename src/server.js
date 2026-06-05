@@ -14,6 +14,7 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { registerBinanceTools } from './tools/binance.js';
 
 const server = new McpServer(
   {
@@ -60,6 +61,13 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
+Binance trading (direct API, NOT via TradingView; needs BINANCE_API_KEY/SECRET in env or .env):
+- Reads: binance_get_balance, binance_get_positions, binance_get_open_orders, binance_get_ticker, binance_get_order_book, binance_get_symbol_info
+- Config: binance_set_leverage, binance_set_margin_type (futures)
+- Orders: binance_place_order, binance_place_bracket (entry+stop+TPs), binance_cancel_order, binance_cancel_all_orders
+- SAFETY: order/bracket/cancel-all are DRY-RUN previews unless confirm:true. NEVER pass confirm:true on the user's behalf — show the preview and let the user confirm. mainnet = real funds.
+- Always check binance_get_symbol_info first to round price/quantity to tickSize/stepSize, or orders get rejected.
+
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
 - ALWAYS use study_filter on pine tools when you know which indicator you want
@@ -84,6 +92,7 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerBinanceTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');

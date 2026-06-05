@@ -45,7 +45,9 @@ function printCommandHelp(name, cmd) {
     console.log('\nOptions:');
     for (const [k, v] of Object.entries(opts)) {
       const flag = v.short ? `-${v.short}, --${k}` : `    --${k}`;
-      console.log(`  ${flag.padEnd(20)}${v.description || ''}`);
+      const required = v.required ? ' (required)' : '';
+      const def = v.default !== undefined ? ` [default: ${v.default}]` : '';
+      console.log(`  ${flag.padEnd(20)}${(v.description || '') + required + def}`);
     }
   }
 }
@@ -98,12 +100,15 @@ export async function run(argv) {
           console.log('\nOptions:');
           for (const [k, v] of Object.entries(options)) {
             const flag = v.short ? `-${v.short}, --${k}` : `    --${k}`;
-            console.log(`  ${flag.padEnd(20)}${v.description || ''}`);
+              const required = v.required ? ' (required)' : '';
+              const def = v.default !== undefined ? ` [default: ${v.default}]` : '';
+              console.log(`  ${flag.padEnd(20)}${(v.description || '') + required + def}`);
           }
         }
         process.exit(0);
       }
-      await execute(handler, values, positionals);
+        validateOptions(values, options, cmdName, subName);
+        await execute(handler, values, positionals);
     } catch (err) {
       handleError(err);
     }
@@ -121,9 +126,62 @@ export async function run(argv) {
         printCommandHelp(cmdName, cmd);
         process.exit(0);
       }
-      await execute(handler, values, positionals);
+        validateOptions(values, options, cmdName);
+        await execute(handler, values, positionals);
     } catch (err) {
       handleError(err);
+    }
+  }
+}
+
+function validateOptions(values, options, cmdName, subName) {
+  // options: object where keys = option name, value may contain { required: true }
+  // 1) Simple required flags
+  for (const [k, v] of Object.entries(options || {})) {
+    if (v.required) {
+      const present = Object.hasOwn(values, k) && values[k] !== undefined;
+      if (!present) {
+        const full = subName ? `${cmdName} ${subName}` : cmdName;
+        console.error(`Missing required option --${k} for command: ${full}`);
+        printCommandHelp(cmdName, commands.get(cmdName));
+        process.exit(1);
+      }
+    }
+  }
+
+  // 2) oneOfGroup: ensure at least one option from each group is present
+  const groups = {};
+  for (const [k, v] of Object.entries(options || {})) {
+    if (v.oneOfGroup) {
+      groups[v.oneOfGroup] = groups[v.oneOfGroup] || [];
+      groups[v.oneOfGroup].push(k);
+    }
+  }
+  for (const [groupName, keys] of Object.entries(groups)) {
+    const anyPresent = keys.some((k) => Object.prototype.hasOwnProperty.call(values, k) && values[k] !== undefined);
+    if (!anyPresent) {
+      const full = subName ? `${cmdName} ${subName}` : cmdName;
+      console.error(`Missing one of the options [${keys.join(', ')}] for command: ${full}`);
+      printCommandHelp(cmdName, commands.get(cmdName));
+      process.exit(1);
+    }
+  }
+
+  // 3) mutuallyExclusiveGroup: ensure at most one option from each group is present
+  const mexGroups = {};
+  for (const [k, v] of Object.entries(options || {})) {
+    if (v.mutuallyExclusiveGroup) {
+      mexGroups[v.mutuallyExclusiveGroup] = mexGroups[v.mutuallyExclusiveGroup] || [];
+      mexGroups[v.mutuallyExclusiveGroup].push(k);
+    }
+  }
+  for (const [groupName, keys] of Object.entries(mexGroups)) {
+    const present = keys.filter((k) => Object.prototype.hasOwnProperty.call(values, k) && values[k] !== undefined);
+    if (present.length > 1) {
+      const full = subName ? `${cmdName} ${subName}` : cmdName;
+      console.error(`Options ${present.join(', ')} are mutually exclusive for command: ${full}`);
+      printCommandHelp(cmdName, commands.get(cmdName));
+      process.exit(1);
     }
   }
 }
