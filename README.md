@@ -26,8 +26,10 @@ The debug port is disabled by default and must be explicitly enabled by you usin
 - Store, transmit, or redistribute any market data
 - Work without a valid TradingView subscription and installed Desktop app
 - Bypass any TradingView paywall or access restriction
-- Execute real trades (chart interaction only)
+- Execute trades **through TradingView** (the CDP bridge is chart-interaction only)
 - Work if TradingView changes their internal Electron structure
+
+> **Optional Binance module (separate from the above).** The repo also ships a standalone `tv binance` client (`src/core/binance.js`) that talks **directly to Binance's REST API** with your own API keys — independent of the TradingView/CDP bridge, and it **can place real orders**. Safeguards: orders are a **dry-run preview unless `--confirm`**, **post-only by default** (taker requires `--allowTaker`), keys are read only from a **gitignored `.env`**, and it does nothing at all unless you configure keys. See [Binance trading](#binance-trading-direct-api) below.
 
 ## Research Context
 
@@ -67,6 +69,7 @@ Gives your AI assistant eyes and hands on your own chart:
 - **Monitor your chart** — stream JSONL from your locally running chart for local monitoring scripts
 - **CLI access** — every MCP tool is also a `tv` CLI command, pipe-friendly with JSON output
 - **Launch TradingView** — auto-detect and launch with debug mode from any platform
+- **Binance trading (optional, separate)** — a standalone `tv binance` client (40 tools) places real Binance spot / USD-M / COIN-M orders via your own API keys; dry-run + post-only by default. Includes laddered scale-in, risk-based position sizing, a portfolio risk report, multi-account mirroring, and account monitoring. Independent of the TradingView bridge — see [Binance trading](#binance-trading-direct-api)
 
 ## Install with Claude Code
 
@@ -160,6 +163,78 @@ tv pane symbol 1 ES1!              # set pane symbol
 tv stream quote | jq '.close'      # monitor price changes
 ```
 
+### Binance CLI examples
+
+All commands take `--account 1|2|3…` (default `1`) to target a specific API-key set, and `-m spot|futures|coinm` (default `futures`).
+
+```bash
+# --- reads (no funds at risk) ---
+tv binance balance                                  # account balances (futures by default)
+tv binance balance --account 2                      # a second API-key set
+tv binance positions                                # open futures positions
+tv binance account-summary                          # wallet/margin balance, uPnL, margin ratio
+tv binance risk-report                              # per-position liq distance, % of equity, exposure
+tv binance ticker --symbol BTCUSDC                  # latest price (public)
+tv binance klines --symbol BTCUSDC -i 1h -n 100     # candlesticks for the exact contract (public)
+tv binance ticker-24hr --symbol BTCUSDC             # 24h change/high/low/volume (public)
+tv binance book-ticker --symbol BTCUSDC             # best bid/ask + computed spread (public)
+tv binance funding --symbol BTCUSDC                 # perpetual funding rate (public)
+tv binance income --symbol BTCUSDC                  # realized PnL / funding / commissions, summarized
+tv binance order-history --symbol BTCUSDC           # all orders: open, filled, cancelled
+tv binance symbol-info --symbol BTCUSDC             # tick/step/minNotional filters
+tv binance leverage-brackets --symbol BTCUSDC       # max-leverage tiers per notional
+tv binance position-mode                            # Hedge Mode vs one-way
+
+# --- risk sizing (pure calc) ---
+# From entry/stop + risk budget → quantity, notional, required margin (warns if it breaks 3x):
+tv binance position-size --symbol BTCUSDC --entry 60000 --stop 58900 --riskPct 1 --leverage 3
+
+# --- placing orders (DRY-RUN unless --confirm; post-only unless --noPostOnly) ---
+# Post-only limit (defaults to GTX on futures / LIMIT_MAKER on spot):
+tv binance order --symbol BTCUSDC --side BUY --type LIMIT --quantity 0.001 --price 60000
+
+# Hedge-mode accounts must pass --positionSide:
+tv binance order --symbol BTCUSDC --side SELL --type LIMIT -q 1 -p 64800 --positionSide SHORT --confirm
+
+# Taker order types (MARKET / STOP_MARKET / TAKE_PROFIT_MARKET) require --allowTaker:
+tv binance order --symbol BTCUSDC --side BUY --type MARKET -q 0.01 --allowTaker --confirm
+
+# Scale in with a ladder of N post-only rungs across a range, optional seed + protective stop:
+tv binance ladder --symbol BTCUSDC --side BUY --lo 59800 --hi 60500 --count 50 \
+  --totalNotional 100000 --positionSide LONG --seed 0.001 --stop 58900   # add --confirm to place
+
+# One-shot bracket: entry (post-only LIMIT) + protective stop + take-profits:
+tv binance bracket --symbol BTCUSDC --side SELL -q 1 \
+  --entryType LIMIT --entryPrice 64800 --stop 67500 --tp 61300:0.5 --tp 60000:0.5 \
+  --hedge --allowTaker            # add --confirm to actually place
+
+# Ensure an open position has a protective stop (places one only if missing):
+tv binance ensure-stop --symbol BTCUSDC --stop 58900     # add --confirm to place
+
+# Amend a resting LIMIT order in place (no cancel+replace):
+tv binance modify --symbol BTCUSDC --orderId 123456789 --side BUY -q 0.033 -p 60100 --confirm
+
+# Mirror one order across accounts, sized by balance ratio (DRY-RUN unless --confirm):
+tv binance mirror-order --symbol BTCUSDC --side BUY --type LIMIT -q 0.01 -p 60000 \
+  --positionSide LONG --accounts 1,2
+
+# Futures config + cancels:
+tv binance leverage --symbol BTCUSDC --leverage 3 --account 2
+tv binance set-position-mode --hedge --account 2     # switch Hedge/one-way (idempotent)
+tv binance margin-type --symbol BTCUSDC --marginType CROSSED
+tv binance cancel --symbol BTCUSDC --orderId 123456789
+tv binance cancel-all --symbol BTCUSDC --confirm
+tv binance cancel-algo --algoId 1000001871754500     # cancel a conditional/stop (algo) order
+
+# Monitor account/position state — JSONL on every change (Ctrl-C to stop):
+tv binance stream --symbol BTCUSDC --account 1
+tv binance account-snapshot --account 1              # one-shot compact snapshot
+
+# Wallet transfer (DRY-RUN unless --confirm; needs "Universal Transfer" enabled on the key):
+tv binance transfer --asset USDC --amount 100 --from futures --to spot
+tv binance transfer-history --from futures --to spot
+```
+
 ### All Commands
 
 ```
@@ -178,7 +253,16 @@ tv replay start/step/stop/status/autoplay/trade
 tv stream quote/bars/values/lines/labels/tables/all
 tv ui click/keyboard/hover/scroll/find/eval/type/panel/fullscreen/mouse
 tv screenshot / discover / ui-state / range / scroll
+tv binance balance/account-summary/account-snapshot/risk-report/positions/stream
+tv binance orders/order-status/order-history/order/modify/cancel/cancel-all/cancel-algo
+tv binance ladder/bracket/ensure-stop/position-size
+tv binance ticker/klines/ticker-24hr/book-ticker/funding/avg-price/rolling-ticker/depth
+tv binance symbol-info/leverage-brackets/trades/agg-trades/historical/account-trades/income
+tv binance leverage/margin-type/position-mode/set-position-mode/commission/server-time
+tv binance mirror-order/mirror-bracket/transfer/transfer-history
 ```
+
+All `tv binance` commands accept `--account <n>` (multi-account, default `1`) and `-m spot|futures|coinm`.
 
 ## Streaming
 
@@ -198,6 +282,54 @@ tv stream tables --filter Profiler       # table data monitoring
 tv stream all                            # all panes at once (multi-symbol)
 ```
 
+## Binance trading (direct API)
+
+> [!CAUTION]
+> This is a **separate, optional** component that places **real orders on your Binance account** using **your own API keys**. It is independent of the TradingView/CDP bridge — TradingView is not involved in execution. Cryptocurrency trading carries substantial risk of loss. You are solely responsible for every order placed.
+
+`src/core/binance.js` (and the matching `tv binance` CLI / `binance_*` MCP tools) talk directly to Binance's signed REST API. It is unrelated to TradingView and only does something once you provide keys.
+
+**Setup:** copy `.env.example` to `.env` (gitignored) and fill in your keys. Multiple accounts are supported — the unsuffixed pair is account `1`, and `_2` / `_3` / … add more (used by `--account` and the mirror tools):
+
+```
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+BINANCE_API_KEY_2=...
+BINANCE_API_SECRET_2=...
+```
+
+Keys are read from `.env` or the environment — never hardcoded, never committed. Restrict the key to trading (no withdrawals) and ideally to your IP. See `.env.example` for the full template and recommended permissions.
+
+**Safety model (built in):**
+
+| Guard | Behavior |
+|-------|----------|
+| **Dry-run by default** | `order`, `bracket`, and `cancel-all` return a preview and send nothing unless you pass `--confirm` / `confirm:true`. |
+| **Post-only by default** | LIMIT orders are maker-only (futures `GTX`, spot `LIMIT_MAKER`). Disable per-order with `--noPostOnly`. |
+| **Taker opt-in** | `MARKET` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` are blocked unless you pass `--allowTaker` (they cannot be post-only). |
+| **Hedge-mode aware** | In Hedge Mode, orders require `--positionSide LONG\|SHORT`; `placeOrder` auto-detects and refuses to guess. `bracket` derives it from `--side` (`--hedge`). |
+| **Precision rounding** | Price/quantity snap to the symbol's tickSize/stepSize so orders aren't rejected (`--noRound` to disable). |
+| **Algo routing** | Conditional orders (STOP / TP) auto-route to Binance's algo endpoint (`/fapi/v1/algoOrder`) per the 2025-12 migration; `get-open-orders` merges them; `cancel-algo` / `cancel-all` clear them. |
+| **Clock-skew guard** | Signed requests auto-resync to Binance server time and retry once on a `-1021` timestamp error. |
+| **Rate-limit backoff** | Signed requests retry `429` / `418` with `Retry-After`/exponential backoff (hardens the ladder & batch paths). |
+| **Multi-account** | Every command takes `--account 1\|2\|3…`; keys resolve per account. Leverage / margin-type / position-mode are NOT mirrored — set them per account. |
+
+`market` is `futures` (USD-M) by default; pass `-m spot` for spot or `-m coinm` for COIN-M. `leverage`, `margin-type`, `position-mode`, `account-summary`, `risk-report`, `bracket`, and `ladder` are futures-only.
+
+**Tool groups (40 tools / 42 CLI subcommands):**
+
+| Group | Tools |
+|-------|-------|
+| **Reads** | `balance`, `account-summary`, `account-snapshot`, `risk-report`, `positions`, `orders`, `order-status`, `order-history`, `income`, `account-trades`, `position-mode`, `leverage-brackets`, `commission`, `server-time` |
+| **Market data (public)** | `ticker`, `klines`, `ticker-24hr`, `book-ticker`, `funding`, `avg-price`, `rolling-ticker`, `depth`, `symbol-info`, `trades`, `agg-trades`, `historical` |
+| **Orders & risk (money-moving, dry-run unless `--confirm`)** | `order`, `ladder`, `bracket`, `modify`, `ensure-stop`, `cancel`, `cancel-all`, `cancel-algo`, `mirror-order`, `mirror-bracket`, `transfer` |
+| **Sizing & config** | `position-size` (pure calc), `leverage`, `margin-type`, `set-position-mode` |
+| **Monitoring** | `stream` (JSONL on change), `account-snapshot` |
+
+**COIN-M futures (`-m coinm`)** has the same commands as USD-M — reads, order placement, brackets, cancels, leverage, and margin-type — routed to the coin-margined (`dapi`) API. **One critical difference: COIN-M `--quantity` is in CONTRACTS** (a fixed USD notional each, e.g. $100/contract for BTC), not coin amount. Order previews include a `coinm_note` reminder, and `symbol-info` reports `contractSize`.
+
+See [Binance CLI examples](#binance-cli-examples) above for usage.
+
 ## How Claude Knows Which Tool to Use
 
 Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project. It contains a complete decision tree:
@@ -215,7 +347,9 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (119 MCP tools)
+
+The tables below cover the **79 TradingView chart tools**. The **40 Binance tools** are documented separately under [Binance trading](#binance-trading-direct-api).
 
 ### Chart Reading
 
@@ -343,7 +477,14 @@ The key flag: `--remote-debugging-port=9222`
 npm test
 ```
 
-29 tests covering: Pine Script static analysis, server-side compilation, and CLI routing.
+```bash
+# No TradingView needed (pure unit tests):
+npm run test:unit                  # pine_analyze + CLI routing
+node --test tests/binance.test.js  # 90 Binance unit tests (DI-mocked, no network)
+node --test tests/sanitization.test.js   # CDP injection-prevention tests
+```
+
+Test coverage: Pine Script static analysis, server-side compilation, CLI routing, CDP injection prevention, and the Binance module (90 tests — post-only/taker gates, dry-run guards, hedge mode, precision, algo routing, **per-account key routing**, ladder/batch, risk sizing, rate-limit backoff — all via injected `_deps`, no live API).
 
 ## Architecture
 
@@ -351,10 +492,10 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
 ```
 
-- **Transport**: MCP over stdio (78 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
-- **Connection**: Chrome DevTools Protocol on localhost:9222
-- **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
-- **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
+- **Transport**: MCP over stdio (119 tools — 79 TradingView + 40 Binance) + CLI (`tv` command, 29 commands; the `binance` command alone has 42 subcommands)
+- **Connection**: Chrome DevTools Protocol on localhost:9222 (TradingView); signed REST to Binance (trading module, independent of CDP)
+- **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout (`tv stream` for the chart, `tv binance stream` for account/positions)
+- **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface` (the Binance module is zero-dep: HMAC signing + a tiny `.env` parser)
 
 ## Attributions
 

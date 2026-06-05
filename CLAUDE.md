@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-78 MCP tools (and matching `tv` CLI commands) for reading and controlling a live TradingView Desktop chart via Chrome DevTools Protocol on `localhost:9222`. Two consumers, one core: an MCP server (stdio) and a pipe-friendly CLI.
+119 MCP tools total (and matching `tv` CLI commands): **79 for reading and controlling a live TradingView Desktop chart** via Chrome DevTools Protocol on `localhost:9222`, plus **40 in the separate Binance trading module**. Two consumers, one core: an MCP server (stdio) and a pipe-friendly CLI.
+
+There is also a **separate, optional Binance trading module** (`src/core/binance.js` + `tv binance` + `binance_*` MCP tools — 40 tools / 42 CLI subcommands) that talks directly to Binance's signed REST API with the user's own API keys. It is **independent of the TradingView/CDP layer** (no chart involved) and can place **real orders**. See "Binance module" below before touching it.
 
 ## Development Commands
 
@@ -17,6 +19,7 @@ npm test                           # e2e + pine_analyze (e2e REQUIRES TradingVie
 npm run test:unit                  # pine_analyze + cli — no TradingView needed
 npm run test:cli                   # CLI router tests
 npm run test:e2e                   # full e2e (needs live TradingView)
+npm run test:all                   # e2e + pine_analyze + cli
 npm run test:verbose               # spec reporter
 node --test tests/sanitization.test.js   # CDP injection-prevention tests (pure unit, no TV)
 node --test tests/replay.test.js         # replay logic unit tests
@@ -25,7 +28,7 @@ node --test tests/replay.test.js         # replay logic unit tests
 node --test --test-name-pattern="setSymbol" tests/sanitization.test.js
 ```
 
-There is no lint/format step configured. Tests use the built-in `node:test` runner — no Jest, Mocha, or Vitest.
+There is no lint/format step configured. Tests use the built-in `node:test` runner — no Jest, Mocha, or Vitest. The package is `"type": "module"` (ESM) — all source files use `import`/`export`, not `require`.
 
 ## Code Architecture
 
@@ -83,11 +86,9 @@ The codebase is a strict three-layer fan-out from a single core. **All TradingVi
 - All entity IDs from `chart_get_state` are session-specific — never cache across sessions.
 - Screenshots write to `screenshots/` and return a path, not image bytes.
 
-## How to pick a tool
+## Decision tree — picking the right tool
 
 Below is the decision tree the model should consult when responding to user requests on a live chart.
-
-## Decision Tree
 
 ### "What's on my chart right now?"
 1. `chart_get_state` → symbol, timeframe, chart type, list of all indicators with entity IDs
@@ -145,7 +146,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 6. `replay_stop` → return to realtime
 
 ### "Screen multiple symbols"
-- `batch_run` with `symbols: ["ES1!", "NQ1!", "YM1!"]` and `action: "screenshot"` or `"get_ohlcv"`
+- `batch_run` with `symbols: ["ES1!", "NQ1!", "YM1!"]` and `action: "screenshot"`, `"get_ohlcv"`, or `"get_strategy_results"` (reads Strategy Tester metrics from DOM)
 
 ### "Draw on the chart"
 - `draw_shape` → horizontal_line, trend_line, rectangle, text (pass point + optional point2)
@@ -204,6 +205,55 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Screenshots save to `screenshots/` directory with timestamps
 - OHLCV capped at 500 bars, trades at 20 per request
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
+
+## Binance module (`src/core/binance.js`)
+
+Separate from everything above — it does **not** use CDP, `evaluate()`, `safeString`, or `KNOWN_PATHS`. It signs Binance REST calls with HMAC-SHA256 using keys from a **gitignored `.env`** (`BINANCE_API_KEY`/`BINANCE_API_SECRET`, plus `_2`/`_3`… for more accounts), loaded by a tiny zero-dep parser. Like the rest of core, every function takes `_deps` for DI — here `{ fetch, now, keys, sleep }` — which `tests/binance.test.js` injects to assert on the exact requests built (no network). **90 unit tests**; run `npm run test:binance` (or `node --test tests/binance.test.js`).
+
+Surfaces: core in `src/core/binance.js`, MCP wrappers in `src/tools/binance.js` (registered in `server.js`), CLI in `src/cli/commands/binance.js` (`tv binance <sub>`). **40 tools / 42 CLI subcommands**, grouped:
+- **Reads:** `getBalance`, `getAccountSummary`, `getAccountSnapshot`, `getRiskReport`, `getPositions`, `getOpenOrders`, `getOrder`, `getOrderHistory`, `getIncome`, `getAccountTrades`, `getPositionMode`, `getLeverageBrackets`, `getCommissionRate`, `getServerTime`.
+- **Market data (public, unsigned):** `getTicker`, `getKlines`, `get24hrTicker`, `getBookTicker`, `getFundingRate`, `getAvgPrice`*, `getRollingWindowTicker`*, `getOrderBook`, `getSymbolInfo`, `getRecentTrades`, `getAggTrades`, `getHistoricalTrades` (*spot-only).
+- **Money-moving (dry-run unless `confirm:true`):** `placeOrder`, `placeLadder`, `placeBracket`, `modifyOrder`, `ensureProtectiveStop`, `cancelOrder`, `cancelAllOrders`, `cancelAlgoOrder`, `mirrorOrder`, `mirrorBracket`, `transfer`.
+- **Sizing & config:** `calcPositionSize` (pure calc), `setLeverage`, `setMarginType`, `setPositionMode`.
+
+**Invariants to preserve when editing (these are deliberate, see memory):**
+- **Dry-run by default:** `placeOrder`, `placeLadder`, `placeBracket`, `modifyOrder`, `ensureProtectiveStop`, `cancelAllOrders`, `mirrorOrder`, `mirrorBracket`, `transfer` return a preview and send nothing unless `confirm: true`. Never auto-confirm on the user's behalf.
+- **Post-only by default:** LIMIT orders → `GTX` (futures) / `LIMIT_MAKER` (spot). Taker-only types (`MARKET`, `STOP_MARKET`, `TAKE_PROFIT_MARKET`) throw unless `allowTaker: true`.
+- **Hedge mode:** the user's account is in Hedge Mode — futures orders need `positionSide` (LONG/SHORT) and must NOT send `reduceOnly`. `placeOrder` auto-detects on confirm and refuses to guess; `placeBracket` derives `positionSide` from `side`.
+- **Precision:** price/qty snap to tickSize/stepSize via `exchangeInfo` (`round` default true).
+- **Conditional orders use the Algo endpoint (Binance migration, 2025-12-09):** USD-M `STOP/STOP_MARKET/TAKE_PROFIT/TAKE_PROFIT_MARKET/TRAILING_STOP_MARKET` are rejected by `POST /fapi/v1/order` with `-4120` and must POST to `/fapi/v1/algoOrder` with `algoType=CONDITIONAL` and **`triggerPrice`** (not `stopPrice`). `placeOrder`/`placeBracket` auto-route these (`useAlgo = isStop && isFutures`). `getOpenOrders` merges `openAlgoOrders`; `cancelAlgoOrder(algoId)` + `cancelAllOrders` clear them. Plain LIMIT/MARKET still use `/fapi/v1/order`. COIN-M conditional routing is NOT yet migrated in code (still `/dapi/v1/order`).
+- **Clock skew & rate limits:** `signedRequest` applies a server-time offset and retries once on `-1021`; it also retries `429`/`418` with `Retry-After`/exponential backoff (sleep injectable via `_deps.sleep`).
+- **Per-account key routing (do not regress):** EVERY signed or account-specific function takes `account` and resolves keys via `resolveDeps(account, _deps)`, then passes `_deps: deps` to `signedRequest`. A function that omits `account` silently falls back to account 1's keys (`getKeys()`), which is a dangerous bug — e.g. cancelling/transferring on the wrong account. This was fixed across `getPositionMode`, `setPositionMode`, `setLeverage`, `setMarginType`, `getCommissionRate`, `getOrder`, `cancelOrder`, `cancelAlgoOrder`, `getAccountTrades`, `getHistoricalTrades`, `getOrderHistory`, `transfer`, `getTransferHistory` (+ all new tools). `tests/binance.test.js` "account routing" suite injects a `getKeys` spy to assert each routes the requested account. The CLI/MCP wrappers must forward `account`/`o.account` too.
+- **Laddered scale-in:** `placeLadder` builds N evenly-spaced post-only LIMIT rungs across `[lo,hi]` from `totalNotional` OR `totalQuantity` (exactly one), with optional `seedQuantity` (MARKET) and `stop` (closePosition STOP_MARKET). DRY-RUN by default; on confirm it places seed → stop (delegated to `placeOrder`) then the rungs via `batchPlaceOrders` (futures `/batchOrders`, 5/request). Inherits hedge/precision rules.
+- **Protective-stop helper:** `ensureProtectiveStop` is idempotent — if a closePosition STOP already rests it does nothing; else (and only if a position exists) it places one. Dry-run unless confirm.
+- **Risk tooling (read-only):** `calcPositionSize` (pure: entry/stop + riskAmount|riskPct → qty/notional/margin, warns if it breaches the user's 3x rule) and `getRiskReport` (per-position liq-distance %, % of equity, gross exposure). The user's standing rule: **always 3x leverage, never more; trade USDC pairs only (BTCUSDC default)** — see memory.
+- **Monitoring:** `getAccountSnapshot` is a compact one-call snapshot; `tv binance stream` polls it and emits JSONL on change (CLI-only loop in the subcommand handler — it never returns; `--once` for a single snapshot).
+- **Wallet transfers:** `transfer()` uses Binance Universal Transfer (`/sapi/v1/asset/transfer`, spot host) — dry-run unless `confirm:true`. `from`/`to` wallets (spot/futures/coinm) map to a transfer `type`; one side must be spot. Requires the API key to have "Permits Universal Transfer" enabled.
+- **Multi-account trade mirroring:** every user-facing function takes an optional `account` ("1" = primary `BINANCE_API_KEY`, "2"/"3"… = `BINANCE_API_KEY_2`…); `getKeys(account)` resolves the suffix. `mirrorOrder`/`mirrorBracket` (`binance_mirror_order` / `tv binance mirror-order`, + `-bracket`) fan a single order/bracket out across `accounts` (default `["1","2"]`), **sized by balance ratio**: base account = `accounts[0]` (factor 1), each mirror gets `quantity × (its balance / base balance)` snapped to stepSize via `planMirrorSizing`. They **delegate to `placeOrder`/`placeBracket` per account**, so dry-run/post-only/hedge/precision/algo routing are all inherited. DRY-RUN by default; on confirm the base is placed first and mirrors are skipped if it fails (or if a scaled size floors below `minQty`). **Leverage/margin-type are NOT mirrored** — set them per account with `setLeverage`/`setMarginType` + `account`.
+- `market` defaults to `futures` (USD-M, `fapi`). `getPositions`/`setLeverage`/`setMarginType`/`placeBracket` are futures-only.
+- **COIN-M (`coinm`, `dapi`) has full parity with USD-M** — reads, orders, brackets, cancels, leverage, margin-type, position-mode, commission all route to `/dapi/v1/...` via the `isFuturesLike`/`futPrefix` helpers (USD-M = `/fapi`, COIN-M = `/dapi`). **Critical difference: COIN-M `quantity` is in CONTRACTS** (a fixed USD notional each, e.g. $100/contract for BTC), not coin amount. This is surfaced as a `coinm_note` in order previews and via `getSymbolInfo`'s `contractSize`. The post-only/hedge/rounding logic is shared; COIN-M `LOT_SIZE` stepSize is typically `1` so quantities floor to whole contracts.
+
+## Skills and Agents
+
+The repo ships Claude Code–native skills (in `skills/`) and a custom subagent (in `agents/`):
+
+| Path | Purpose |
+|------|---------|
+| `skills/pine-develop/` | Full Pine Script write → compile → fix loop |
+| `skills/chart-analysis/` | Set up chart, add indicators, annotate, screenshot |
+| `skills/multi-symbol-scan/` | Batch symbol screening workflow |
+| `skills/replay-practice/` | Guided replay mode trading practice |
+| `skills/strategy-report/` | Backtest results gathering and reporting |
+| `skills/binance-ladder-entry/` | Plan/size/dry-run/place a laddered scale-in (seed + protective stop) |
+| `skills/chart-to-binance-trade/` | Read chart levels → risk-sized Binance order/ladder + stop (bridges CDP chart → CEX execution) |
+| `skills/binance-account-review/` | Read-only cross-account health/exposure/funding/PnL report |
+| `skills/binance-position-manager/` | Protect & manage an open position (ensure-stop, take-profits, modify, trail) |
+| `skills/binance-multi-account-mirror/` | Pre-flight (hedge/3x) then mirror a trade across accounts by balance ratio |
+| `skills/binance-trade-review/` | Post-trade review: realized PnL, funding, commissions, fills |
+| `agents/performance-analyst.md` | Subagent: gather strategy data and analyze performance |
+| `agents/binance-risk-analyst.md` | Subagent: deep read-only multi-account Binance risk/exposure sweep |
+
+Skills reference `scripts/pine_pull.js` and `scripts/pine_push.js` for reading/injecting Pine code. `scripts/` also contains platform-specific TradingView launch scripts (`launch_tv_debug.bat`, `.vbs`, `.sh`).
 
 ## Runtime Topology
 
