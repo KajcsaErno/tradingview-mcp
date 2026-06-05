@@ -1,0 +1,65 @@
+//@version=5
+// BTC Mean-Reversion Fade — LONG ONLY, 2% risk sizing, ATR trailing stop.
+// Buy when the daily close is >= 2.5 ATR BELOW the 100-day SMA.
+// Initial stop 2 ATR below entry; once price runs, a 3-ATR trailing stop ratchets
+// up under the highs (never down). No fixed target — let winners run. No shorts.
+// Each trade sized so a stop-out loses ~2% of current equity.
+strategy("BTC MeanRev Fade LONG Trail +200F (100SMA)", overlay=true,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1,
+     initial_capital = 10000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,
+     slippage = 10,
+     pyramiding = 0,
+     process_orders_on_close = true)
+
+// ---- Inputs ----
+maLen     = input.int(100,   "SMA length")
+trendLen  = input.int(200,   "Trend filter SMA")
+atrLen    = input.int(14,    "ATR length")
+stretch   = input.float(2.5, "Entry stretch (ATR)")
+stopMult  = input.float(2.0, "Initial stop (ATR)")
+trailMult = input.float(3.0, "Trailing distance (ATR)")
+riskPct   = input.float(2.0, "Risk % of equity per trade") / 100.0
+startY    = input.int(2021,  "Backtest start year")
+startM    = input.int(5,     "Backtest start month")
+startD    = input.int(31,    "Backtest start day")
+
+// ---- Core series ----
+basis   = ta.sma(close, maLen)
+trendMA = ta.sma(close, trendLen)
+atr     = ta.atr(atrLen)
+dist    = (close - basis) / atr          // signed distance from mean, in ATRs
+upTrend = close > trendMA                // only buy dips while in an uptrend
+
+inWindow = time >= timestamp(startY, startM, startD, 0, 0)
+
+// ---- Entry (long-only): size so a stop-out risks ~riskPct of equity ----
+longCond = dist <= -stretch and upTrend
+qty = atr > 0 ? (riskPct * strategy.equity) / (stopMult * atr) : na
+
+if inWindow and strategy.position_size == 0 and longCond and not na(qty)
+    strategy.entry("Long", strategy.long, qty = qty)
+
+// ---- Seed ATR snapshot + trailing stop on the bar the position opens ----
+var float eATR = na
+var float trailStop = na
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    eATR := atr
+    trailStop := strategy.position_avg_price - stopMult * eATR
+
+// ---- Ratchet the trailing stop up under the highs (never down) ----
+if strategy.position_size > 0
+    trailStop := math.max(trailStop, high - trailMult * eATR)
+    strategy.exit("xL", "Long", stop = trailStop)
+
+// reset when flat
+if strategy.position_size == 0
+    trailStop := na
+
+// ---- Visuals ----
+plot(basis, "SMA 100", color = color.orange, linewidth = 2)
+plot(trendMA, "Trend SMA 200", color = color.new(color.fuchsia, 20), linewidth = 2)
+plot(basis - stretch * atr, "Buy zone", color = color.new(color.lime, 60))
+plot(strategy.position_size > 0 ? trailStop : na, "Trail stop", color = color.red, style = plot.style_linebr, linewidth = 2)
