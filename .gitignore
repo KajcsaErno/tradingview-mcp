@@ -1,6 +1,28 @@
 node_modules/
+
+# Secrets / credentials (NEVER commit — see .env.example for the template)
+.env
+.env.local
+.env.*.local
+
+# Generated / runtime artifacts
 screenshots/
 scripts/current.pine
 temp_*
+tmp_*
 *.log
 discovery-log.json
+drawings-backup-*.json
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
+
+# OS junk
+.DS_Store
+Thumbs.db
