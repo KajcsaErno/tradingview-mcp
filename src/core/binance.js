@@ -57,6 +57,27 @@ function loadDotEnv() {
   }
 }
 
+/** Global testnet switch. When BINANCE_TESTNET is truthy (1/true/yes/on), every market is
+ *  routed to its `-testnet` host and TESTNET credentials are used — no need to append
+ *  "-testnet" to each call's `market`. A `_deps.testnet` boolean overrides the env (for tests). */
+function useTestnet(_deps = {}) {
+  if (_deps && _deps.testnet !== undefined) return !!_deps.testnet;
+  loadDotEnv();
+  const v = String(process.env.BINANCE_TESTNET ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+/** Map a logical market to its effective host market. With the testnet switch on, "futures"
+ *  becomes "futures-testnet" (etc.); an already-explicit "*-testnet" market is left alone, as is
+ *  any market with no testnet variant. Endpoint paths are host-independent, so only the base
+ *  host changes — the logical market is still echoed in responses. */
+function resolveMarket(market, _deps = {}) {
+  if (!market || market.includes('testnet')) return market;
+  if (!useTestnet(_deps)) return market;
+  const tn = `${market}-testnet`;
+  return BASES[tn] ? tn : market;
+}
+
 /** Resolve the env-var suffix for an account id. Account "1"/"primary"/undefined uses the
  *  unsuffixed BINANCE_API_KEY/SECRET (the original single-account vars); "2", "3", … use
  *  BINANCE_API_KEY_<n>/BINANCE_API_SECRET_<n>. */
@@ -72,12 +93,15 @@ function accountSuffix(account) {
 function getKeys(account = '1') {
   loadDotEnv();
   const suffix = accountSuffix(account);
-  const key = process.env[`BINANCE_API_KEY${suffix}`];
-  const secret = process.env[`BINANCE_API_SECRET${suffix}`];
+  // With the testnet switch on, read TESTNET credentials (mainnet keys do not work on testnet).
+  const testnet = useTestnet();
+  const prefix = testnet ? 'BINANCE_TESTNET_API' : 'BINANCE_API';
+  const key = process.env[`${prefix}_KEY${suffix}`];
+  const secret = process.env[`${prefix}_SECRET${suffix}`];
   if (!key || !secret) {
     throw new Error(
-      `Binance credentials missing for account "${account}". Set BINANCE_API_KEY${suffix} and ` +
-      `BINANCE_API_SECRET${suffix} (in your environment or a gitignored .env at the project root).`
+      `Binance ${testnet ? 'TESTNET ' : ''}credentials missing for account "${account}". Set ${prefix}_KEY${suffix} and ` +
+      `${prefix}_SECRET${suffix} (in your environment or a gitignored .env at the project root).`
     );
   }
   return { key, secret };
@@ -125,6 +149,8 @@ async function signedRequest({ market = 'futures', method = 'GET', endpoint, par
   const now = _deps.now || Date.now;
   const sleep = _deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const { key, secret } = _deps.keys || getKeys();
+  // Route to the testnet host when the global switch is on (endpoint paths are unchanged).
+  market = resolveMarket(market, _deps);
   const base = BASES[market];
   if (!base) throw new Error(`Unknown market "${market}". Use one of: ${Object.keys(BASES).join(', ')}`);
 
@@ -158,9 +184,10 @@ async function signedRequest({ market = 'futures', method = 'GET', endpoint, par
 export async function getServerTime({ market = 'futures', _deps = {} } = {}) {
   const fetchFn = _deps.fetch || fetch;
   const now = _deps.now || Date.now;
-  _timeOffset = await fetchTimeOffset({ market, fetchFn, now });
+  const testnet = useTestnet(_deps);
+  _timeOffset = await fetchTimeOffset({ market: resolveMarket(market, _deps), fetchFn, now });
   return {
-    success: true, market, offsetMs: _timeOffset, localTime: now(),
+    success: true, market, testnet, offsetMs: _timeOffset, localTime: now(),
     note: Math.abs(_timeOffset) > 1000
       ? `clock skew ${_timeOffset}ms — offset is now applied to all signed requests`
       : 'clock within 1s of Binance',
@@ -170,6 +197,7 @@ export async function getServerTime({ market = 'futures', _deps = {} } = {}) {
 /** Public (unsigned) request helper for endpoints that do not require signing */
 async function publicRequest({ market = 'futures', method = 'GET', endpoint, params = {}, includeApiKey = false, _deps = {} } = {}) {
   const fetchFn = _deps.fetch || fetch;
+  market = resolveMarket(market, _deps); // testnet switch routes to the testnet host
   const base = BASES[market];
   if (!base) throw new Error(`Unknown market "${market}". Use one of: ${Object.keys(BASES).join(', ')}`);
   const query = new URLSearchParams(params).toString();
@@ -260,14 +288,33 @@ export async function getAccountSnapshot({ market = 'futures', symbol, account =
  *  required margin at `leverage`. Warns if the plan breaches the 3x rule or available margin. */
 export async function calcPositionSize({
   market = 'futures', symbol, entry, stop, leverage = 3,
+  side, atrMult, interval = '1h',
   riskAmount, riskPct, balance, account = '1', round = true, _deps = {},
 } = {}) {
   const entryP = requireFinite(entry, 'entry');
-  const stopP = requireFinite(stop, 'stop');
   const lev = requireFinite(leverage, 'leverage');
+  const deps = resolveDeps(account, _deps);
+  // Stop comes either from an explicit price, or is derived from ATR (entry ± atrMult·ATR).
+  // The ATR path needs the position side (so the stop sits on the right side) and a symbol.
+  let stopP, atrInfo;
+  if (stop != null) {
+    stopP = requireFinite(stop, 'stop');
+  } else if (atrMult != null) {
+    const mult = requireFinite(atrMult, 'atrMult');
+    if (!symbol) throw new Error('ATR-based stop needs a symbol to pull candles for');
+    const sd = String(side || '').toUpperCase();
+    const isLong = ['BUY', 'LONG'].includes(sd);
+    const isShort = ['SELL', 'SHORT'].includes(sd);
+    if (!isLong && !isShort) throw new Error('ATR-based stop needs side: BUY/LONG or SELL/SHORT');
+    const tech = await getTechnicals({ market, symbol, interval: interval || '1h', _deps: deps });
+    if (tech.atr == null) throw new Error('could not compute ATR (not enough candles) — pass an explicit stop instead');
+    stopP = px(isLong ? entryP - mult * tech.atr : entryP + mult * tech.atr);
+    atrInfo = { source: 'ATR', atr: tech.atr, atrMult: mult, interval: interval || '1h' };
+  } else {
+    throw new Error('pass stop, or atrMult (+side) to derive an ATR-based stop');
+  }
   if (entryP === stopP) throw new Error('entry and stop must differ');
   if (riskAmount == null && riskPct == null) throw new Error('pass riskAmount ($) or riskPct (% of balance)');
-  const deps = resolveDeps(account, _deps);
   let bal = balance != null ? Number(balance) : undefined;
   let risk;
   if (riskAmount != null) {
@@ -301,6 +348,7 @@ export async function calcPositionSize({
     quantity: Number(qty.toFixed(8)), notional: Number(notional.toFixed(2)), requiredMargin: Number(requiredMargin.toFixed(2)),
     balance: bal != null ? Number(bal.toFixed(2)) : undefined,
     impliedAccountLeverage: bal != null ? Number((notional / bal).toFixed(2)) : undefined,
+    atrStop: atrInfo,
     warnings: warnings.length ? warnings : undefined,
   };
 }
@@ -535,7 +583,7 @@ export async function placeOrder({
     endpoint = futures ? `${futPrefix(market)}/v1/order` : '/api/v3/order';
   }
 
-  const isLive = !market.includes('testnet');
+  const isLive = !resolveMarket(market, deps).includes('testnet');
   const preview = { market, endpoint, ...params, live_funds: isLive };
 
   if (!confirm) {
@@ -700,6 +748,28 @@ export async function getIncome({ market = 'futures', symbol, incomeType, startT
   return { success: true, market, account, count: (data || []).length, summary, income: data };
 }
 
+/** Forced-liquidation / ADL history (signed, futures only): the user's OWN positions that
+ *  Binance force-closed. Filter by symbol, autoCloseType (LIQUIDATION | ADL) and time window
+ *  (if startTime is omitted, Binance returns the 7 days before endTime). This is the
+ *  backward-looking complement to getRiskReport's forward-looking distance-to-liquidation. */
+export async function getLiquidationHistory({ market = 'futures', symbol, autoCloseType, startTime, endTime, limit = 50, account = '1', _deps = {} } = {}) {
+  if (!isFuturesLike(market)) throw new Error('liquidation history is futures-only');
+  const deps = resolveDeps(account, _deps);
+  const params = {};
+  if (symbol) params.symbol = String(symbol).toUpperCase();
+  if (autoCloseType) {
+    const t = String(autoCloseType).toUpperCase();
+    if (!['LIQUIDATION', 'ADL'].includes(t)) throw new Error('autoCloseType must be LIQUIDATION or ADL');
+    params.autoCloseType = t;
+  }
+  if (startTime !== undefined) params.startTime = String(requireFinite(startTime, 'startTime'));
+  if (endTime !== undefined) params.endTime = String(requireFinite(endTime, 'endTime'));
+  params.limit = String(Math.max(1, Math.min(Number(limit) || 50, 100)));
+  const data = await signedRequest({ market, endpoint: `${futPrefix(market)}/v1/forceOrders`, params, _deps: deps });
+  const orders = Array.isArray(data) ? data : [];
+  return { success: true, market, account, count: orders.length, orders };
+}
+
 /** Latest price for a symbol (public). Handy for sizing before an order. */
 export async function getTicker({ market = 'futures', symbol, _deps = {} } = {}) {
   if (!symbol) throw new Error('symbol is required');
@@ -730,7 +800,7 @@ const KLINE_INTERVALS = ['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h',
 
 /** Candlesticks (klines) for a symbol (public). Pulls OHLCV for the EXACT Binance
  *  contract you trade (e.g. BTCUSDC futures), independent of any TradingView chart. */
-export async function getKlines({ market = 'futures', symbol, interval = '1h', startTime, endTime, limit = 500, _deps = {} } = {}) {
+export async function getKlines({ market = 'futures', symbol, interval = '1h', startTime, endTime, limit = 500, extended = false, _deps = {} } = {}) {
   if (!symbol) throw new Error('symbol is required');
   const sym = String(symbol).toUpperCase();
   const iv = String(interval);
@@ -743,16 +813,27 @@ export async function getKlines({ market = 'futures', symbol, interval = '1h', s
   params.limit = String(Math.max(1, Math.min(Number(limit) || 500, cap)));
   const endpoint = isFuturesLike(market) ? `${futPrefix(market)}/v1/klines` : '/api/v3/klines';
   const data = await publicRequest({ market, endpoint, params, _deps });
-  const candles = (data || []).map(mapKline);
+  const candles = (data || []).map((k) => mapKline(k, extended));
   return { success: true, market, symbol: sym, interval: iv, count: candles.length, candles };
 }
 
-// Klines come back as positional arrays — name the fields we expose.
-const mapKline = (k) => ({ openTime: k[0], open: k[1], high: k[2], low: k[3], close: k[4], volume: k[5], closeTime: k[6] });
+// Klines come back as positional arrays — name the fields we expose. With `extended`, also
+// surface the order-flow columns Binance returns (quote volume, trade count, taker buys) —
+// useful for flow analysis, off by default to keep payloads compact.
+const mapKline = (k, extended = false) => {
+  const c = { openTime: k[0], open: k[1], high: k[2], low: k[3], close: k[4], volume: k[5], closeTime: k[6] };
+  if (extended) {
+    c.quoteVolume = k[7];
+    c.trades = k[8];
+    c.takerBuyVolume = k[9];
+    c.takerBuyQuoteVolume = k[10];
+  }
+  return c;
+};
 
 /** UI-optimized candlesticks (spot-only `/api/v3/uiKlines`) — same shape as getKlines but the
  *  bars are tuned by Binance for chart presentation (consistent spacing at boundaries). */
-export async function getUiKlines({ market = 'spot', symbol, interval = '1h', startTime, endTime, limit = 500, _deps = {} } = {}) {
+export async function getUiKlines({ market = 'spot', symbol, interval = '1h', startTime, endTime, limit = 500, extended = false, _deps = {} } = {}) {
   if (isFuturesLike(market)) throw new Error('uiKlines is spot-only (use getKlines for futures)');
   if (!symbol) throw new Error('symbol is required');
   const sym = String(symbol).toUpperCase();
@@ -763,7 +844,7 @@ export async function getUiKlines({ market = 'spot', symbol, interval = '1h', st
   if (endTime !== undefined) params.endTime = String(requireFinite(endTime, 'endTime'));
   params.limit = String(Math.max(1, Math.min(Number(limit) || 500, 1000)));
   const data = await publicRequest({ market, endpoint: '/api/v3/uiKlines', params, _deps });
-  const candles = (data || []).map(mapKline);
+  const candles = (data || []).map((k) => mapKline(k, extended));
   return { success: true, market, symbol: sym, interval: iv, count: candles.length, candles };
 }
 
@@ -874,6 +955,37 @@ export async function getRollingWindowTicker({ market = 'spot', symbol, symbols,
   return { success: true, market, windowSize: win, ...map24hr({ ...t, symbol: t.symbol || sym }) };
 }
 
+const COMPARE_SORT_KEYS = ['priceChangePercent', 'priceChange', 'quoteVolume', 'volume', 'lastPrice'];
+
+/** Compare several symbols side-by-side on 24-hour stats, ranked by one metric (public). Fetches
+ *  each symbol's 24hr ticker (works on spot/futures/coinm), then returns a sorted, ranked table
+ *  plus the leader/laggard. `symbols` is an array or CSV; `sortBy` is one of priceChangePercent
+ *  (default), priceChange, quoteVolume, volume, lastPrice (descending). Unknown sortBy falls back
+ *  to priceChangePercent. */
+export async function compareSymbols({ market = 'futures', symbols, sortBy = 'priceChangePercent', _deps = {} } = {}) {
+  const list = Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : null);
+  const syms = [...new Set((list || []).map((s) => String(s).trim().toUpperCase()).filter(Boolean))];
+  if (!syms.length) throw new Error('symbols is required (array or CSV, e.g. "BTCUSDC,ETHUSDC")');
+  const key = COMPARE_SORT_KEYS.includes(sortBy) ? sortBy : 'priceChangePercent';
+  const rows = await Promise.all(syms.map(async (sym) => {
+    const t = await get24hrTicker({ market, symbol: sym, _deps });
+    return {
+      symbol: sym, lastPrice: t.lastPrice,
+      priceChange: t.priceChange, priceChangePercent: t.priceChangePercent,
+      highPrice: t.highPrice, lowPrice: t.lowPrice,
+      volume: t.volume, quoteVolume: t.quoteVolume,
+    };
+  }));
+  rows.sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0));
+  rows.forEach((r, i) => { r.rank = i + 1; });
+  return {
+    success: true, market, sortBy: key, count: rows.length,
+    leader: rows[0] ? rows[0].symbol : undefined,
+    laggard: rows.length ? rows[rows.length - 1].symbol : undefined,
+    comparison: rows,
+  };
+}
+
 /** Funding rate for a perpetual (public). Default returns the current premium-index snapshot
  *  (mark/index price + last & next funding); history:true returns recent funding payments. */
 export async function getFundingRate({ market = 'futures', symbol, history = false, limit = 10, _deps = {} } = {}) {
@@ -920,7 +1032,7 @@ export async function startUserStream({ market = 'futures', account = '1', _deps
   const deps = resolveDeps(account, _deps);
   const data = await publicRequest({ market, method: 'POST', endpoint: listenKeyEndpoint(market), includeApiKey: true, _deps: deps });
   if (!data || !data.listenKey) throw new Error('Binance returned no listenKey');
-  return { success: true, market, account, listenKey: data.listenKey, wsUrl: `${WS_BASES[market]}/ws/${data.listenKey}` };
+  return { success: true, market, account, listenKey: data.listenKey, wsUrl: `${WS_BASES[resolveMarket(market, deps)]}/ws/${data.listenKey}` };
 }
 
 /** Refresh a user-data stream's 60-min expiry (call ~every 30 min). Futures key off the account;
@@ -941,6 +1053,152 @@ export async function closeUserStream({ market = 'futures', account = '1', liste
   const params = futuresLike ? {} : { listenKey: String(listenKey || '') };
   await publicRequest({ market, method: 'DELETE', endpoint: listenKeyEndpoint(market), params, includeApiKey: true, _deps: deps });
   return { success: true, market, account };
+}
+
+/** Watch a symbol's live trades over a public WebSocket for a bounded window, then return a
+ *  compact summary (open/high/low/close + change, VWAP, volume, tick count). Public/unsigned —
+ *  subscribes to the `<symbol>@aggTrade` stream (available on spot, USD-M and COIN-M). This is
+ *  the bounded, request/response counterpart to the unbounded `tv binance stream` loop: an
+ *  agent can ask "watch BTC for 15s and tell me what happened" and get one result back.
+ *  `durationSec` is clamped to [1, 60]. If the socket closes early, whatever was collected is
+ *  summarized. `_deps.WebSocket` / `_deps.setTimeout` / `_deps.clearTimeout` are injectable
+ *  for testing (defaults to the runtime globals). */
+export async function watchPrice({ market = 'futures', symbol, durationSec = 10, _deps = {} } = {}) {
+  if (!symbol) throw new Error('symbol is required');
+  const sym = String(symbol).toUpperCase();
+  const dur = Math.max(1, Math.min(Number(durationSec) || 10, 60));
+  const base = WS_BASES[resolveMarket(market, _deps)];
+  if (!base) throw new Error(`unknown market ${market}`);
+  const WS = _deps.WebSocket || (typeof WebSocket !== 'undefined' ? WebSocket : null);
+  if (!WS) throw new Error('WebSocket is not available in this runtime');
+  const setTimer = _deps.setTimeout || setTimeout;
+  const clearTimer = _deps.clearTimeout || clearTimeout;
+  const wsUrl = `${base}/ws/${sym.toLowerCase()}@aggTrade`;
+
+  return new Promise((resolve, reject) => {
+    const ticks = [];
+    let settled = false, timer = null, ws;
+
+    const summarize = () => {
+      const n = ticks.length;
+      if (!n) {
+        return {
+          success: true, market, symbol: sym, durationSec: dur, ticks: 0,
+          note: 'No trades observed in the window (illiquid pair, wrong symbol/market, or window too short).',
+        };
+      }
+      let high = -Infinity, low = Infinity, volume = 0, pv = 0;
+      for (const t of ticks) {
+        if (t.price > high) high = t.price;
+        if (t.price < low) low = t.price;
+        volume += t.qty;
+        pv += t.price * t.qty;
+      }
+      const open = ticks[0].price, close = ticks[n - 1].price, change = close - open;
+      return {
+        success: true, market, symbol: sym, durationSec: dur, ticks: n,
+        open, high, low, close, change,
+        changePct: open ? `${((change / open) * 100).toFixed(4)}%` : undefined,
+        vwap: volume > 0 ? Number((pv / volume).toFixed(8)) : undefined,
+        volume: Number(volume.toFixed(8)),
+        firstTradeTime: ticks[0].time, lastTradeTime: ticks[n - 1].time,
+      };
+    };
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimer(timer);
+      try { ws && ws.close(); } catch { /* ignore */ }
+      if (err) reject(err); else resolve(summarize());
+    };
+
+    try { ws = new WS(wsUrl); } catch (e) { return finish(e); }
+    timer = setTimer(() => finish(), dur * 1000);
+    ws.addEventListener('message', (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      const price = Number(m.p), qty = Number(m.q);
+      if (Number.isFinite(price)) ticks.push({ price, qty: Number.isFinite(qty) ? qty : 0, time: m.T });
+    });
+    ws.addEventListener('error', () => { /* a close event follows; we summarize there */ });
+    ws.addEventListener('close', () => finish());
+  });
+}
+
+// ── Public market-data stream (combined multiplex) ───────────────────────────
+// Continuous PUSH of public market data — the unbounded, multi-symbol/multi-stream-type
+// counterpart to the bounded watchPrice. buildMarketStream() builds the combined-stream URL
+// (`/stream?streams=a@trade/b@bookTicker/…`) and is pure/DI-testable like startUserStream;
+// the actual WS loop lives in the `tv binance market-stream` CLI subcommand. Unsigned/public.
+const PUBLIC_STREAM_KINDS = new Set(['trade', 'aggTrade', 'ticker', 'bookTicker', 'kline', 'markPrice', 'funding']);
+
+/** Map one stream spec → its Binance suffix. Specs are a kind, optionally `kind:arg`
+ *  (only `kline:<interval>` uses the arg, defaulting to 1m). On futures, the `markPrice`
+ *  stream already carries the funding rate + next funding time, so `funding` is an alias
+ *  for it. markPrice/funding are futures-only. */
+function streamSuffix(spec, market) {
+  const [kind, arg] = String(spec).trim().split(':');
+  if (!PUBLIC_STREAM_KINDS.has(kind))
+    throw new Error(`unknown stream "${spec}" (use trade, aggTrade, ticker, bookTicker, kline[:1m], markPrice, funding)`);
+  if ((kind === 'markPrice' || kind === 'funding') && !isFuturesLike(market))
+    throw new Error(`${kind} stream is futures-only`);
+  switch (kind) {
+    case 'trade': return '@trade';
+    case 'aggTrade': return '@aggTrade';
+    case 'ticker': return '@ticker';
+    case 'bookTicker': return '@bookTicker';
+    case 'kline': return `@kline_${arg || '1m'}`;
+    case 'markPrice':
+    case 'funding': return '@markPrice@1s';
+  }
+}
+
+/** Build the combined-stream WebSocket URL for one or more symbols × stream types. Returns the
+ *  resolved market, the (de-duplicated) raw subscription names and the wsUrl to connect to —
+ *  this is the testable seam; the CLI loop just opens the socket. `symbols`/`streams` are arrays
+ *  or CSV strings; `streams` defaults to `trade`. */
+export function buildMarketStream({ market = 'futures', symbols, streams = 'trade', _deps = {} } = {}) {
+  const m = resolveMarket(market, _deps);
+  const base = WS_BASES[m];
+  if (!base) throw new Error(`unknown market ${market}`);
+  const symList = [...new Set((Array.isArray(symbols) ? symbols : (typeof symbols === 'string' ? symbols.split(',') : []))
+    .map((s) => String(s).trim().toUpperCase()).filter(Boolean))];
+  if (!symList.length) throw new Error('symbols is required (array or CSV, e.g. "BTCUSDC,ETHUSDC")');
+  const streamList = (Array.isArray(streams) ? streams : String(streams).split(','))
+    .map((s) => String(s).trim()).filter(Boolean);
+  if (!streamList.length) throw new Error('streams is required (e.g. "trade,bookTicker,markPrice")');
+  const subscriptions = [];
+  for (const sym of symList)
+    for (const spec of streamList)
+      subscriptions.push(`${sym.toLowerCase()}${streamSuffix(spec, m)}`);
+  const uniq = [...new Set(subscriptions)];
+  return {
+    success: true, market: m, symbols: symList, streams: streamList,
+    subscriptions: uniq, wsUrl: `${base}/stream?streams=${uniq.join('/')}`,
+  };
+}
+
+/** Normalize a combined-stream message into a compact, uniform line. Accepts the wrapped
+ *  `{ stream, data }` envelope (combined streams) or a bare event. Unknown events fall back to
+ *  `{ event, stream, raw }`. Note: spot `bookTicker` carries no `e` field, so it's detected by
+ *  its b/a/s shape. */
+export function formatMarketEvent(msg) {
+  const stream = msg && msg.stream;
+  const d = (msg && msg.data) || msg || {};
+  const e = d.e;
+  if (e === 'trade' || e === 'aggTrade')
+    return { event: e, symbol: d.s, price: Number(d.p), qty: Number(d.q), time: d.T, buyerMaker: d.m };
+  if (e === '24hrTicker')
+    return { event: 'ticker', symbol: d.s, last: Number(d.c), changePct: Number(d.P), high: Number(d.h), low: Number(d.l), volume: Number(d.v), quoteVolume: Number(d.q) };
+  if (e === 'markPriceUpdate')
+    return { event: 'markPrice', symbol: d.s, mark: Number(d.p), index: Number(d.i), fundingRate: Number(d.r), nextFundingTime: d.T, time: d.E };
+  if (e === 'kline') {
+    const k = d.k || {};
+    return { event: 'kline', symbol: d.s, interval: k.i, open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c), volume: Number(k.v), closed: k.x, openTime: k.t, closeTime: k.T };
+  }
+  if (e === 'bookTicker' || (d.b !== undefined && d.a !== undefined && d.s))
+    return { event: 'bookTicker', symbol: d.s, bid: Number(d.b), bidQty: Number(d.B), ask: Number(d.a), askQty: Number(d.A), time: d.T || d.E };
+  return { event: e || 'unknown', stream, raw: d };
 }
 
 /** Symbol trading filters (tick size, step size, min notional) — use these to
@@ -1038,6 +1296,48 @@ export async function setMarginType({ market = 'futures', symbol, marginType, ac
   // Binance returns code 200 {"code":200,"msg":"success"}; -4046 = "no need to change".
   const data = await signedRequest({ market, method: 'POST', endpoint: `${futPrefix(market)}/v1/marginType`, params, _deps: deps });
   return { success: true, market, marginType: mt, response: data };
+}
+
+/**
+ * Add or remove margin on an ISOLATED futures position (POST /fapi|/dapi /v1/positionMargin).
+ * Pushes the liquidation price further away (add) or frees collateral (remove) WITHOUT closing
+ * the position. Only valid for a symbol in ISOLATED margin mode with an open position.
+ *
+ * DRY-RUN by default — it moves funds against a live position, so like the order helpers it
+ * previews unless confirm:true. In Hedge Mode the target is ambiguous (LONG vs SHORT), so
+ * positionSide is required; one-way mode defaults to BOTH. Futures only (USD-M and COIN-M).
+ * Idea borrowed from muvon/mcp-binance-futures.
+ */
+export async function adjustIsolatedMargin({ market = 'futures', symbol, amount, direction = 'add', positionSide, account = '1', confirm = false, _deps = {} } = {}) {
+  if (!isFuturesLike(market)) throw new Error('adjustIsolatedMargin is futures-only');
+  if (!symbol) throw new Error('symbol is required');
+  const dir = String(direction).toLowerCase();
+  if (!['add', 'remove'].includes(dir)) throw new Error("direction must be 'add' or 'remove'");
+  const amt = requireFinite(amount, 'amount');
+  if (amt <= 0) throw new Error('amount must be > 0');
+  const deps = resolveDeps(account, _deps);
+  const sym = String(symbol).toUpperCase();
+  const type = dir === 'add' ? 1 : 2; // Binance positionMargin `type`: 1 = add, 2 = remove
+  const params = { symbol: sym, amount: String(amt), type: String(type) };
+  let ps = positionSide ? String(positionSide).toUpperCase() : null;
+  if (ps && !['LONG', 'SHORT', 'BOTH'].includes(ps)) throw new Error('positionSide must be LONG, SHORT, or BOTH');
+  // Hedge Mode needs an explicit LONG/SHORT — refuse to guess which position to fund.
+  if (!ps && confirm) {
+    const mode = await getPositionMode({ market, _deps: deps });
+    if (mode.hedgeMode) throw new Error('Account is in Hedge Mode — pass positionSide:"LONG" or "SHORT" (CLI --positionSide) so the margin change targets the right position.');
+  }
+  if (ps) params.positionSide = ps;
+  const endpoint = `${futPrefix(market)}/v1/positionMargin`;
+  const isLive = !market.includes('testnet');
+  if (!confirm) {
+    return {
+      success: false, dry_run: true, market, account,
+      message: `DRY RUN — no margin moved. Pass confirm:true to ${dir} ${amt} ${dir === 'add' ? 'into' : 'out of'} the ISOLATED ${sym} position${isLive ? ' (real funds)' : ' (testnet)'}.`,
+      margin_preview: { market, endpoint, ...params, action: dir },
+    };
+  }
+  const data = await signedRequest({ market, method: 'POST', endpoint, params, _deps: deps });
+  return { success: true, market, account, symbol: sym, action: dir, amount: amt, positionSide: ps || 'BOTH', response: data };
 }
 
 /** Leverage/margin tiers (brackets) per notional for a symbol — shows max leverage
@@ -1161,7 +1461,7 @@ export async function placeBracket({
     }
   }
 
-  const isLive = !market.includes('testnet');
+  const isLive = !resolveMarket(market, deps).includes('testnet');
   if (!confirm) {
     return {
       success: false, dry_run: true, market, account, live_funds: isLive, hedgeMode: !!hedgeMode,
@@ -1611,5 +1911,333 @@ export async function getTransferHistory({ from = 'futures', to = 'spot', type, 
   const params = { type: ttype, size: String(Math.max(1, Math.min(Number(size) || 10, 100))) };
   const data = await signedRequest({ market: 'spot', endpoint: '/sapi/v1/asset/transfer', params, _deps: deps });
   return { success: true, type: ttype, total: data.total || 0, rows: data.rows || [] };
+}
+
+// Wallet history / address endpoints live on the SAPI (spot host), like transfer — they are
+// account-level, not per-market, and exist only on mainnet. All are READ-ONLY (GET), so no
+// confirm gate is needed.
+
+/** On-chain deposit history (signed, SAPI/spot host). Filter by coin, status (Binance numeric
+ *  codes: 0 pending, 6 credited-but-cannot-withdraw, 1 success, …) and time window. Read-only. */
+export async function getDepositHistory({ coin, status, startTime, endTime, offset, limit = 100, account = '1', _deps = {} } = {}) {
+  const deps = resolveDeps(account, _deps);
+  const params = {};
+  if (coin) params.coin = String(coin).toUpperCase();
+  if (status !== undefined) params.status = String(status);
+  if (startTime !== undefined) params.startTime = String(requireFinite(startTime, 'startTime'));
+  if (endTime !== undefined) params.endTime = String(requireFinite(endTime, 'endTime'));
+  if (offset !== undefined) params.offset = String(offset);
+  params.limit = String(Math.max(1, Math.min(Number(limit) || 100, 1000)));
+  const data = await signedRequest({ market: 'spot', endpoint: '/sapi/v1/capital/deposit/hisrec', params, _deps: deps });
+  const deposits = Array.isArray(data) ? data : [];
+  return { success: true, account, count: deposits.length, deposits };
+}
+
+/** Withdrawal history (signed, SAPI/spot host). Filter by coin, status (Binance numeric codes:
+ *  0 email-sent, 1 cancelled, 2 awaiting-approval, 4 processing, 5 failure, 6 completed) and
+ *  time window. Read-only. */
+export async function getWithdrawHistory({ coin, status, startTime, endTime, offset, limit = 100, account = '1', _deps = {} } = {}) {
+  const deps = resolveDeps(account, _deps);
+  const params = {};
+  if (coin) params.coin = String(coin).toUpperCase();
+  if (status !== undefined) params.status = String(status);
+  if (startTime !== undefined) params.startTime = String(requireFinite(startTime, 'startTime'));
+  if (endTime !== undefined) params.endTime = String(requireFinite(endTime, 'endTime'));
+  if (offset !== undefined) params.offset = String(offset);
+  params.limit = String(Math.max(1, Math.min(Number(limit) || 100, 1000)));
+  const data = await signedRequest({ market: 'spot', endpoint: '/sapi/v1/capital/withdraw/history', params, _deps: deps });
+  const withdrawals = Array.isArray(data) ? data : [];
+  return { success: true, account, count: withdrawals.length, withdrawals };
+}
+
+/** Deposit address for a coin (signed, SAPI/spot host). `network` is optional (e.g. "BSC",
+ *  "ETH", "TRX", "BNB"); omit to get the coin's default network. Read-only — returns the
+ *  on-chain address, optional memo/tag, and a block-explorer url. */
+export async function getDepositAddress({ coin, network, account = '1', _deps = {} } = {}) {
+  if (!coin) throw new Error('coin is required (e.g. "USDC")');
+  const deps = resolveDeps(account, _deps);
+  const params = { coin: String(coin).toUpperCase() };
+  if (network) params.network = String(network).toUpperCase();
+  const data = await signedRequest({ market: 'spot', endpoint: '/sapi/v1/capital/deposit/address', params, _deps: deps });
+  return { success: true, account, coin: data.coin, address: data.address, tag: data.tag, url: data.url, network: data.network || params.network };
+}
+
+// ── Technical analysis (computed off klines) ─────────────────────────────────
+// Pure indicator math over OHLCV arrays — no network, no chart, no CDP. These power
+// getTechnicals (one symbol) and correlateSymbols (a candidate set), and the ATR figure
+// feeds calcPositionSize's ATR-based stop. Every helper returns null when there aren't
+// enough bars, so callers degrade gracefully instead of throwing. The TradingView side
+// has its own indicators; this is the headless path for the exact Binance contract.
+// (Distinct from compareSymbols above, which is a quick 24hr-stats leaderboard.)
+
+/** Round a price-like value to a precision that suits its magnitude (big numbers → fewer dp). */
+function px(v) {
+  if (v == null || !Number.isFinite(Number(v))) return null;
+  const n = Number(v);
+  const a = Math.abs(n);
+  const dp = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 6 : 8;
+  return Number(n.toFixed(dp));
+}
+
+/** Simple moving average of the last `period` values (null if too few). */
+function sma(values, period) {
+  if (!Array.isArray(values) || period < 1 || values.length < period) return null;
+  let s = 0;
+  for (let i = values.length - period; i < values.length; i++) s += values[i];
+  return s / period;
+}
+
+/** EMA series aligned to `values` (entries are null until the SMA seed at index period-1). */
+function emaSeries(values, period) {
+  const out = new Array(values.length).fill(null);
+  if (period < 1 || values.length < period) return out;
+  const k = 2 / (period + 1);
+  let seed = 0;
+  for (let i = 0; i < period; i++) seed += values[i];
+  let prev = seed / period;
+  out[period - 1] = prev;
+  for (let i = period; i < values.length; i++) {
+    prev = values[i] * k + prev * (1 - k);
+    out[i] = prev;
+  }
+  return out;
+}
+
+/** Last EMA value (null if too few bars). */
+function ema(values, period) {
+  const s = emaSeries(values, period);
+  return s[s.length - 1];
+}
+
+/** Wilder RSI over `period` (null if too few bars). */
+function rsi(closes, period = 14) {
+  if (closes.length < period + 1) return null;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gain += d; else loss -= d;
+  }
+  let avgGain = gain / period, avgLoss = loss / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (d > 0 ? d : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (d < 0 ? -d : 0)) / period;
+  }
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+/** Wilder ATR over `period` from highs/lows/closes (null if too few bars). */
+function atr(highs, lows, closes, period = 14) {
+  const n = closes.length;
+  if (n < period + 1) return null;
+  const tr = [];
+  for (let i = 1; i < n; i++) {
+    const h = highs[i], l = lows[i], pc = closes[i - 1];
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  let a = 0; // seed with SMA of the first `period` true ranges, then Wilder-smooth.
+  for (let i = 0; i < period; i++) a += tr[i];
+  a /= period;
+  for (let i = period; i < tr.length; i++) a = (a * (period - 1) + tr[i]) / period;
+  return a;
+}
+
+/** MACD line/signal/histogram (null if too few bars for the slow EMA + signal). */
+function macd(closes, fast = 12, slow = 26, signalP = 9) {
+  if (closes.length < slow + signalP) return null;
+  const fastS = emaSeries(closes, fast);
+  const slowS = emaSeries(closes, slow);
+  const line = closes.map((_, i) => (fastS[i] != null && slowS[i] != null ? fastS[i] - slowS[i] : null));
+  const defined = line.filter((v) => v != null);
+  const signal = ema(defined, signalP);
+  const macdLine = line[line.length - 1];
+  if (macdLine == null || signal == null) return null;
+  return { macd: macdLine, signal, hist: macdLine - signal };
+}
+
+/** Population standard deviation (null if fewer than 2 values). */
+function stddev(values) {
+  const n = values.length;
+  if (n < 2) return null;
+  const mean = values.reduce((s, v) => s + v, 0) / n;
+  return Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / n);
+}
+
+/** Bollinger Bands (SMA middle ± mult·stddev) over `period` (null if too few bars). */
+function bollinger(closes, period = 20, mult = 2) {
+  if (closes.length < period) return null;
+  const window = closes.slice(-period);
+  const middle = window.reduce((s, v) => s + v, 0) / period;
+  const sd = stddev(window);
+  if (sd == null) return null;
+  return { upper: middle + mult * sd, middle, lower: middle - mult * sd, width: middle ? (2 * mult * sd) / middle : 0 };
+}
+
+/** Cumulative VWAP over the whole window (typical price × volume). */
+function vwap(highs, lows, closes, volumes) {
+  let pv = 0, vol = 0;
+  for (let i = 0; i < closes.length; i++) {
+    const v = volumes[i] || 0;
+    pv += ((highs[i] + lows[i] + closes[i]) / 3) * v;
+    vol += v;
+  }
+  return vol > 0 ? pv / vol : null;
+}
+
+/** Close-to-close simple returns. */
+function simpleReturns(closes) {
+  const out = [];
+  for (let i = 1; i < closes.length; i++) out.push(closes[i] / closes[i - 1] - 1);
+  return out;
+}
+
+/** Pearson correlation of two arrays (uses the common tail; null if degenerate). */
+function pearson(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return null;
+  const xa = a.slice(-n), xb = b.slice(-n);
+  const ma = xa.reduce((s, v) => s + v, 0) / n;
+  const mb = xb.reduce((s, v) => s + v, 0) / n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) {
+    const x = xa[i] - ma, y = xb[i] - mb;
+    num += x * y; da += x * x; db += y * y;
+  }
+  const den = Math.sqrt(da * db);
+  return den === 0 ? null : num / den;
+}
+
+/** Pull named numeric OHLCV arrays out of getKlines() candle objects (strings → numbers). */
+function ohlcvArrays(candles) {
+  const highs = [], lows = [], closes = [], volumes = [];
+  for (const k of (candles || [])) {
+    highs.push(Number(k.high)); lows.push(Number(k.low));
+    closes.push(Number(k.close)); volumes.push(Number(k.volume));
+  }
+  return { highs, lows, closes, volumes };
+}
+
+/** Coarse trend tag from close vs a reference MA and the MACD histogram sign. */
+function classifyTrend(lastClose, trendRef, m) {
+  if (trendRef == null) return 'neutral';
+  if (m) {
+    if (lastClose > trendRef && m.hist > 0) return 'bullish';
+    if (lastClose < trendRef && m.hist < 0) return 'bearish';
+    return 'neutral';
+  }
+  return lastClose > trendRef ? 'bullish' : lastClose < trendRef ? 'bearish' : 'neutral';
+}
+
+/**
+ * Compute technical indicators directly off Binance klines — RSI(14), ATR(14), MACD(12/26/9),
+ * SMA(20/50/200), EMA(12/26/50), Bollinger(20,2) and window VWAP — plus a coarse trend/momentum
+ * classification. Headless: pulls OHLCV for the exact contract and runs the math locally (the
+ * TradingView side has its own indicators). The ATR figure also backs calcPositionSize's ATR
+ * stop. Any indicator without enough bars comes back null rather than failing the whole call.
+ */
+export async function getTechnicals({ market = 'futures', symbol, interval = '1h', limit = 300, _deps = {} } = {}) {
+  if (!symbol) throw new Error('symbol is required');
+  const lim = Math.max(30, Math.min(Number(limit) || 300, isFuturesLike(market) ? 1500 : 1000));
+  const kl = await getKlines({ market, symbol, interval, limit: lim, _deps });
+  const { highs, lows, closes, volumes } = ohlcvArrays(kl.candles);
+  const n = closes.length;
+  if (n < 2) throw new Error(`not enough candles to analyze (${n})`);
+  const lastClose = closes[n - 1];
+
+  const atrVal = atr(highs, lows, closes, 14);
+  const rsiVal = rsi(closes, 14);
+  const macdVal = macd(closes);
+  const bb = bollinger(closes, 20, 2);
+  const vwapVal = vwap(highs, lows, closes, volumes);
+  const smaVals = {}; for (const p of [20, 50, 200]) { const v = sma(closes, p); if (v != null) smaVals[p] = px(v); }
+  const emaVals = {}; for (const p of [12, 26, 50]) { const v = ema(closes, p); if (v != null) emaVals[p] = px(v); }
+
+  const trend = classifyTrend(lastClose, sma(closes, 50) ?? sma(closes, 20), macdVal);
+  const momentum = rsiVal == null ? 'neutral' : rsiVal >= 70 ? 'overbought' : rsiVal <= 30 ? 'oversold' : 'neutral';
+
+  return {
+    success: true, market, symbol: String(symbol).toUpperCase(), interval, bars: n,
+    lastClose: px(lastClose),
+    rsi: rsiVal != null ? Number(rsiVal.toFixed(2)) : null,
+    atr: atrVal != null ? px(atrVal) : null,
+    atrPct: atrVal != null && lastClose ? Number((atrVal / lastClose * 100).toFixed(2)) : null,
+    macd: macdVal ? { macd: px(macdVal.macd), signal: px(macdVal.signal), hist: px(macdVal.hist) } : null,
+    sma: Object.keys(smaVals).length ? smaVals : null,
+    ema: Object.keys(emaVals).length ? emaVals : null,
+    bollinger: bb ? { upper: px(bb.upper), middle: px(bb.middle), lower: px(bb.lower), widthPct: Number((bb.width * 100).toFixed(2)) } : null,
+    vwap: vwapVal != null ? px(vwapVal) : null,
+    classification: { trend, momentum },
+  };
+}
+
+/**
+ * Correlate and rank a candidate set of symbols on COMPUTED technicals: window return %, per-bar
+ * volatility, a Sharpe-like ratio (mean/stddev of returns), ATR %, RSI and a trend tag — plus a
+ * correlation matrix of their close-to-close returns and return/volatility rankings. Built for
+ * portfolio-risk checks (don't stack correlated positions across accounts) and for ranking a
+ * shortlist pulled from the 24hr screener. Fetches klines per symbol (one REST call each) — pass
+ * a focused list, not the whole market. Capped at 10 symbols; per-symbol fetch errors are inline.
+ * (Heavier, klines-based complement to compareSymbols, which only reads one 24hr ticker each.)
+ */
+export async function correlateSymbols({ market = 'futures', symbols, interval = '1h', limit = 200, _deps = {} } = {}) {
+  const list = (Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : []))
+    .map((s) => String(s).trim().toUpperCase()).filter(Boolean);
+  if (list.length < 2) throw new Error('pass at least two symbols to correlate (array or CSV)');
+  const capped = [...new Set(list)].slice(0, 10);
+  const lim = Math.max(30, Math.min(Number(limit) || 200, isFuturesLike(market) ? 1500 : 1000));
+
+  const per = await Promise.all(capped.map(async (sym) => {
+    try {
+      const kl = await getKlines({ market, symbol: sym, interval, limit: lim, _deps });
+      const { highs, lows, closes } = ohlcvArrays(kl.candles);
+      const n = closes.length;
+      if (n < 2) return { symbol: sym, error: 'not enough candles' };
+      const rets = simpleReturns(closes);
+      const sd = stddev(rets);
+      const mean = rets.reduce((s, v) => s + v, 0) / rets.length;
+      const atrVal = atr(highs, lows, closes, 14);
+      const rsiVal = rsi(closes, 14);
+      const lastClose = closes[n - 1];
+      const trend = classifyTrend(lastClose, sma(closes, 50) ?? sma(closes, 20), macd(closes));
+      return {
+        symbol: sym, bars: n, lastClose: px(lastClose),
+        returnPct: Number(((lastClose / closes[0] - 1) * 100).toFixed(2)),
+        volatilityPct: sd != null ? Number((sd * 100).toFixed(3)) : null,
+        sharpe: sd ? Number((mean / sd).toFixed(3)) : null,
+        atrPct: atrVal != null && lastClose ? Number((atrVal / lastClose * 100).toFixed(2)) : null,
+        rsi: rsiVal != null ? Number(rsiVal.toFixed(2)) : null,
+        trend,
+        _returns: rets,
+      };
+    } catch (err) { return { symbol: sym, error: err.message }; }
+  }));
+
+  // Correlation matrix over the common tail length of the symbols that fetched cleanly.
+  const ok = per.filter((p) => !p.error && p._returns);
+  let correlation = null;
+  if (ok.length >= 2) {
+    const minLen = Math.min(...ok.map((p) => p._returns.length));
+    const aligned = ok.map((p) => p._returns.slice(-minLen));
+    const matrix = aligned.map((a, i) => aligned.map((b, j) => {
+      if (i === j) return 1;
+      const c = pearson(a, b);
+      return c == null ? null : Number(c.toFixed(3));
+    }));
+    correlation = { symbols: ok.map((p) => p.symbol), bars: minLen, matrix };
+  }
+
+  const clean = per.map(({ _returns, ...rest }) => rest);
+  const ranked = clean.filter((p) => !p.error);
+  return {
+    success: true, market, interval, count: clean.length,
+    ...(list.length > capped.length ? { note: `capped to first 10 of ${list.length} symbols` } : {}),
+    symbols: clean,
+    rankings: {
+      byReturn: [...ranked].sort((a, b) => (b.returnPct ?? -Infinity) - (a.returnPct ?? -Infinity)).map((p) => p.symbol),
+      byVolatility: [...ranked].sort((a, b) => (b.volatilityPct ?? -Infinity) - (a.volatilityPct ?? -Infinity)).map((p) => p.symbol),
+    },
+    correlation,
+  };
 }
 

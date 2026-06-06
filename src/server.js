@@ -65,7 +65,7 @@ Binance trading (direct API, NOT via TradingView; needs BINANCE_API_KEY/SECRET i
 - Reads: binance_get_balance, binance_get_positions, binance_get_open_orders, binance_get_ticker, binance_get_order_book, binance_get_symbol_info
 - Config: binance_set_leverage, binance_set_margin_type (futures)
 - Orders: binance_place_order, binance_place_bracket (entry+stop+TPs), binance_cancel_order, binance_cancel_all_orders
-- SAFETY: order/bracket/cancel-all are DRY-RUN previews unless confirm:true. NEVER pass confirm:true on the user's behalf — show the preview and let the user confirm. mainnet = real funds.
+- SAFETY: order/bracket/cancel-all are DRY-RUN previews unless confirm:true. NEVER pass confirm:true on the user's behalf — show the preview and let the user confirm. mainnet = real funds (set BINANCE_TESTNET=1 to route everything to testnet/paper; previews then show live_funds:false).
 - Always check binance_get_symbol_info first to round price/quantity to tickSize/stepSize, or orders get rejected.
 
 CONTEXT MANAGEMENT:

@@ -32,10 +32,13 @@ export function registerBinanceTools(server) {
     market, symbol: symbol.optional(), account,
   }, wrap(core.getAccountSnapshot));
 
-  server.tool('binance_calc_position_size', 'Risk-based position sizing: from entry, stop and a risk budget (riskAmount $ or riskPct of balance) compute quantity, notional and required margin at leverage. Warns if it breaches the 3x rule or available margin.', {
+  server.tool('binance_calc_position_size', 'Risk-based position sizing: from entry, a stop (explicit price OR derived from ATR) and a risk budget (riskAmount $ or riskPct of balance) compute quantity, notional and required margin at leverage. Warns if it breaches the 3x rule or available margin.', {
     market, symbol: symbol.optional(),
     entry: z.coerce.number().describe('Entry price'),
-    stop: z.coerce.number().describe('Stop-loss price'),
+    stop: z.coerce.number().optional().describe('Stop-loss price. Omit to derive it from ATR (pass side + atrMult).'),
+    side: z.enum(['BUY', 'SELL', 'LONG', 'SHORT']).optional().describe('Position direction — required for an ATR-derived stop (which side the stop sits on).'),
+    atrMult: z.coerce.number().optional().describe('Derive the stop as entry ∓ atrMult·ATR (needs symbol + side). ATR(14) is pulled off klines at `interval`.'),
+    interval: z.string().default('1h').describe('Kline interval for the ATR-derived stop (default 1h).'),
     leverage: z.coerce.number().default(3).describe('Leverage (default 3)'),
     riskAmount: z.coerce.number().optional().describe('Risk budget in quote currency ($)'),
     riskPct: z.coerce.number().optional().describe('Risk budget as % of balance (e.g. 1 = 1%)'),
@@ -69,6 +72,7 @@ export function registerBinanceTools(server) {
     startTime: z.coerce.number().optional().describe('Start time (ms epoch)'),
     endTime: z.coerce.number().optional().describe('End time (ms epoch)'),
     limit: z.coerce.number().optional().describe('Bars to return (spot max 1000, futures max 1500; default 500)'),
+    extended: z.boolean().default(false).describe('Also include order-flow fields per bar (quoteVolume, trades, takerBuyVolume, takerBuyQuoteVolume). Off by default for compact output.'),
   }, wrap(core.getKlines));
 
   server.tool('binance_get_24hr_ticker', '24-hour price-change stats (public). One symbol, or all:true for every symbol on the market (optionally narrowed to a quote asset, e.g. "USDC") — a one-call screener.', {
@@ -89,6 +93,7 @@ export function registerBinanceTools(server) {
     startTime: z.coerce.number().optional().describe('Start time (ms epoch)'),
     endTime: z.coerce.number().optional().describe('End time (ms epoch)'),
     limit: z.coerce.number().optional().describe('Bars to return (max 1000; default 500)'),
+    extended: z.boolean().default(false).describe('Also include order-flow fields per bar (quoteVolume, trades, takerBuyVolume, takerBuyQuoteVolume). Off by default for compact output.'),
   }, wrap(core.getUiKlines));
 
   server.tool('binance_get_trading_day_ticker', 'Trading-day price-change stats (spot-only) anchored to the exchange trading day in timeZone. One symbol, or a symbols list to scan several.', {
@@ -113,6 +118,26 @@ export function registerBinanceTools(server) {
     symbols: z.array(z.string()).optional().describe('List of symbols to scan at once'),
     windowSize: z.string().default('1d').describe('Window, e.g. "1m"-"59m", "1h"-"23h", "1d"-"7d"'),
   }, wrap(core.getRollingWindowTicker));
+
+  server.tool('binance_compare_symbols', 'Compare several symbols side-by-side on 24h stats, ranked by a chosen metric (public). Returns a sorted, ranked table + leader/laggard. Works on spot/futures/coinm.', {
+    market,
+    symbols: z.array(z.string()).describe('Symbols to compare, e.g. ["BTCUSDC","ETHUSDC","SOLUSDC"]'),
+    sortBy: z.enum(['priceChangePercent', 'priceChange', 'quoteVolume', 'volume', 'lastPrice']).default('priceChangePercent').describe('Metric to rank by (descending)'),
+  }, wrap(core.compareSymbols));
+
+  // ---- Technical analysis (computed off klines, public) ----
+  server.tool('binance_get_technicals', 'Technical indicators computed off klines for the exact Binance contract (no chart): RSI(14), ATR(14), MACD(12/26/9), SMA(20/50/200), EMA(12/26/50), Bollinger(20,2), window VWAP, plus a trend/momentum classification. The ATR also feeds binance_calc_position_size. Indicators with too few bars come back null.', {
+    market, symbol,
+    interval: z.enum(['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']).default('1h'),
+    limit: z.coerce.number().optional().describe('Bars to analyze (min 30; default 300; spot max 1000, futures max 1500)'),
+  }, wrap(core.getTechnicals));
+
+  server.tool('binance_correlate_symbols', 'Deep multi-symbol analysis off klines: per-symbol window return %, per-bar volatility, Sharpe-like ratio, ATR %, RSI and trend tag, plus a correlation matrix of close-to-close returns and return/volatility rankings. For portfolio-risk checks (avoid stacking correlated positions) and ranking a shortlist. One klines call per symbol — pass a focused list (capped at 10). The heavier complement to binance_compare_symbols.', {
+    market,
+    symbols: z.array(z.string()).describe('Symbols to correlate/rank, e.g. ["BTCUSDC","ETHUSDC","SOLUSDC"]'),
+    interval: z.enum(['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']).default('1h'),
+    limit: z.coerce.number().optional().describe('Bars per symbol (min 30; default 200)'),
+  }, wrap(core.correlateSymbols));
 
   // ---- User-data stream (real-time push of fills/positions/balance) ----
   server.tool('binance_start_user_stream', 'Open a user-data stream: returns a listenKey + wsUrl for real-time PUSH of order fills, position and balance changes. Connect a WebSocket to wsUrl; refresh with keepalive every ~30 min. (For a ready-made live feed, run the `tv binance user-stream` CLI.)', {
@@ -155,6 +180,11 @@ export function registerBinanceTools(server) {
     market, symbol, limit: z.coerce.number().optional(),
   }, wrap(core.getRecentTrades));
 
+  server.tool('binance_watch_price', 'Watch a symbol\'s live trades over a public WebSocket for a bounded window (durationSec, 1-60s, default 10), then return a compact summary: open/high/low/close + change, VWAP, volume, tick count. Bounded request/response counterpart to the unbounded `tv binance stream` loop — use it to answer "what is price doing right now?"', {
+    market, symbol,
+    durationSec: z.coerce.number().min(1).max(60).default(10).describe('How long to watch, in seconds (1-60, default 10)'),
+  }, wrap(core.watchPrice));
+
   server.tool('binance_get_account_trades', "User's account trades for a symbol (signed)", {
     market, symbol, fromId: z.union([z.string(), z.number()]).optional(), limit: z.coerce.number().optional(), account,
   }, wrap(core.getAccountTrades));
@@ -175,6 +205,14 @@ export function registerBinanceTools(server) {
     account,
   }, wrap(core.getIncome));
 
+  server.tool('binance_get_liquidation_history', "Forced-liquidation / ADL history (signed, futures only): the user's own positions that Binance force-closed. Backward-looking complement to binance_get_risk_report.", {
+    market, symbol: symbol.optional(),
+    autoCloseType: z.enum(['LIQUIDATION', 'ADL']).optional().describe('Filter: LIQUIDATION or ADL (auto-deleverage). Omit for both.'),
+    startTime: z.coerce.number().optional(), endTime: z.coerce.number().optional(),
+    limit: z.coerce.number().optional().describe('Max rows (default 50, max 100)'),
+    account,
+  }, wrap(core.getLiquidationHistory));
+
   // ---- Config (futures) ----
   server.tool('binance_set_leverage', 'Set leverage for a futures symbol (1-125)', {
     market, symbol, leverage: z.coerce.number().describe('Integer leverage 1-125'), account,
@@ -184,13 +222,33 @@ export function registerBinanceTools(server) {
     market, symbol, marginType: z.enum(['ISOLATED', 'CROSSED']), account,
   }, wrap(core.setMarginType));
 
+  server.tool('binance_adjust_isolated_margin',
+    'Add or remove margin on an ISOLATED futures position (pushes the liquidation price away / frees collateral) WITHOUT closing it. DRY-RUN unless confirm:true. Hedge Mode requires positionSide.', {
+    market, symbol,
+    amount: z.coerce.number().describe('Margin amount to move (> 0)'),
+    direction: z.enum(['add', 'remove']).default('add').describe("'add' increases margin (liq further away); 'remove' frees collateral"),
+    positionSide: z.enum(['LONG', 'SHORT', 'BOTH']).optional().describe('Required in Hedge Mode; defaults to BOTH in one-way mode'),
+    account,
+    confirm: z.boolean().default(false).describe('Must be true to actually move margin (real funds on mainnet)'),
+  }, wrap(core.adjustIsolatedMargin));
+
   server.tool('binance_get_leverage_brackets', 'Leverage/margin tiers (max leverage + maintenance-margin steps per notional) for a symbol (futures only)', {
     market, symbol: symbol.optional(), account,
   }, wrap(core.getLeverageBrackets));
 
   // ---- Money-moving (DRY-RUN unless confirm:true) ----
   server.tool('binance_place_order',
-    'Place an order. DRY-RUN preview unless confirm:true. Supports MARKET/LIMIT and stop/TP types (STOP, STOP_MARKET, TAKE_PROFIT, TAKE_PROFIT_MARKET).', {
+    'Place an order. DRY-RUN preview unless confirm:true (real funds on mainnet).\n'
+    + 'Two order GROUPS with different rules:\n'
+    + '  IMMEDIATE (fill now / rest at price; quantity required):\n'
+    + '    MARKET — side=BUY, quantity=0.01 (taker: needs allowTaker:true)\n'
+    + '    LIMIT  — side=SELL, quantity=0.01, price=64800 (post-only/GTX by default)\n'
+    + '  CONDITIONAL (wait for stopPrice trigger; STOP/STOP_MARKET/TAKE_PROFIT/TAKE_PROFIT_MARKET):\n'
+    + '    Stop-loss full close:  side=SELL, type=STOP_MARKET, stopPrice=62000, closePosition:true\n'
+    + '    Stop-loss partial:     side=SELL, type=STOP_MARKET, stopPrice=62000, quantity=0.01, reduceOnly:true\n'
+    + 'closePosition:true closes the ENTIRE position (no quantity, max 1 SL + 1 TP per direction) — '
+    + 'reduceOnly:true closes a PARTIAL quantity (multiple allowed). Never set both. '
+    + 'Hedge Mode: pass positionSide (LONG/SHORT), not reduceOnly. USD-M conditionals auto-route to the Algo endpoint.', {
     market, symbol,
     side: z.enum(['BUY', 'SELL']),
     type: z.enum(['MARKET', 'LIMIT', 'STOP', 'STOP_MARKET', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET']).default('MARKET'),
@@ -339,4 +397,29 @@ export function registerBinanceTools(server) {
   server.tool('binance_get_transfer_history', 'Recent universal transfers for a wallet pair', {
     from: wallet.default('futures'), to: wallet.default('spot'), size: z.coerce.number().optional(), account,
   }, wrap(core.getTransferHistory));
+
+  // ---- Wallet history / address (read-only, SAPI/spot host, mainnet) ----
+  server.tool('binance_get_deposit_history', 'On-chain deposit history (signed). Filter by coin, status (numeric Binance codes) and time window. Read-only.', {
+    coin: z.string().optional().describe('Asset to filter by, e.g. "USDC" (omit for all)'),
+    status: z.coerce.number().optional().describe('Binance status code: 0 pending, 6 credited-cannot-withdraw, 1 success'),
+    startTime: z.coerce.number().optional(), endTime: z.coerce.number().optional(),
+    offset: z.coerce.number().optional(),
+    limit: z.coerce.number().optional().describe('Max rows (default 100, max 1000)'),
+    account,
+  }, wrap(core.getDepositHistory));
+
+  server.tool('binance_get_withdraw_history', 'Withdrawal history (signed). Filter by coin, status (numeric Binance codes) and time window. Read-only.', {
+    coin: z.string().optional().describe('Asset to filter by, e.g. "USDC" (omit for all)'),
+    status: z.coerce.number().optional().describe('Binance status code: 0 email-sent, 1 cancelled, 2 awaiting-approval, 4 processing, 5 failure, 6 completed'),
+    startTime: z.coerce.number().optional(), endTime: z.coerce.number().optional(),
+    offset: z.coerce.number().optional(),
+    limit: z.coerce.number().optional().describe('Max rows (default 100, max 1000)'),
+    account,
+  }, wrap(core.getWithdrawHistory));
+
+  server.tool('binance_get_deposit_address', 'Deposit address for a coin (signed, read-only). Returns address, optional memo/tag, and explorer url.', {
+    coin: z.string().describe('Asset, e.g. "USDC"'),
+    network: z.string().optional().describe('Network, e.g. "BSC", "ETH", "TRX", "BNB" (omit for the coin default)'),
+    account,
+  }, wrap(core.getDepositAddress));
 }

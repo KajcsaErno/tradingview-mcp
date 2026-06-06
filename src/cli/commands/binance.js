@@ -34,12 +34,15 @@ register('binance', {
       handler: (o) => core.getRiskReport({ market: o.market || 'futures', account: o.account }),
     }],
     ['position-size', {
-      description: 'Risk-based position sizing from entry/stop and a risk budget (--riskAmount or --riskPct)',
+      description: 'Risk-based position sizing from entry + a stop (explicit --stop, or ATR-derived via --atrMult and --side) and a risk budget (--riskAmount or --riskPct)',
       options: {
         market: marketOpt,
-        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC (enables qty rounding)' },
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC (enables qty rounding; required for an ATR-derived stop)' },
         entry: { type: 'string', description: 'Entry price', required: true },
-        stop: { type: 'string', description: 'Stop-loss price', required: true },
+        stop: { type: 'string', description: 'Stop-loss price (omit to derive from ATR with --atrMult + --side)' },
+        side: { type: 'string', description: 'BUY/LONG or SELL/SHORT — required for an ATR-derived stop' },
+        atrMult: { type: 'string', description: 'Derive the stop as entry ∓ atrMult·ATR(14) off klines (needs --symbol and --side)' },
+        interval: { type: 'string', short: 'i', description: 'Kline interval for the ATR stop (default 1h)' },
         leverage: { type: 'string', short: 'l', description: 'Leverage (default 3)' },
         riskAmount: { type: 'string', description: 'Risk budget in $', oneOfGroup: 'risk_budget', mutuallyExclusiveGroup: 'risk_budget' },
         riskPct: { type: 'string', description: 'Risk budget as % of balance', oneOfGroup: 'risk_budget', mutuallyExclusiveGroup: 'risk_budget' },
@@ -48,7 +51,9 @@ register('binance', {
         account: accountOpt,
       },
       handler: (o) => core.calcPositionSize({
-        market: o.market || 'futures', symbol: o.symbol, entry: Number(o.entry), stop: Number(o.stop),
+        market: o.market || 'futures', symbol: o.symbol, entry: Number(o.entry),
+        stop: o.stop !== undefined ? Number(o.stop) : undefined,
+        side: o.side, atrMult: o.atrMult !== undefined ? Number(o.atrMult) : undefined, interval: o.interval || '1h',
         leverage: o.leverage !== undefined ? Number(o.leverage) : undefined,
         riskAmount: o.riskAmount !== undefined ? Number(o.riskAmount) : undefined,
         riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
@@ -158,6 +163,55 @@ register('binance', {
         await new Promise(() => {}); // never resolves — runs until Ctrl-C (matches `tv binance stream`)
       },
     }],
+    ['market-stream', {
+      description: 'Stream public market data (trade/ticker/bookTicker/kline/markPrice/funding) for one or more symbols over a multiplexed WebSocket; emits JSONL. Ctrl-C to stop.',
+      options: {
+        market: marketOpt,
+        symbols: { type: 'string', short: 's', description: 'CSV of symbols, e.g. "BTCUSDC,ETHUSDC"', required: true },
+        streams: { type: 'string', description: 'CSV of stream types: trade,aggTrade,ticker,bookTicker,kline[:1m],markPrice,funding (default trade,bookTicker)' },
+        raw: { type: 'boolean', description: 'Emit the raw Binance payload instead of the compact summary' },
+      },
+      handler: async (o) => {
+        const market = o.market || 'futures';
+        let plan;
+        try { plan = core.buildMarketStream({ market, symbols: o.symbols, streams: o.streams || 'trade,bookTicker' }); }
+        catch (e) { process.stderr.write(`[market-stream] ${e.message}\n`); process.exit(1); return; }
+
+        process.stderr.write('⚠  tradingview-mcp | Unofficial. Public market data only — no account/keys involved.\n');
+        process.stderr.write(`[market-stream:${market}] ${plan.subscriptions.join(', ')} — Ctrl-C to stop\n`);
+
+        let running = true, ws = null, backoff = 1000;
+        const emit = (obj) => process.stdout.write(JSON.stringify({ time: new Date().toISOString(), _stream: 'market', market, ...obj }) + '\n');
+
+        const cleanup = () => {
+          running = false;
+          try { ws && ws.close(); } catch { /* ignore */ }
+          process.stderr.write('\n[market-stream] stopped\n');
+          process.exit(0);
+        };
+        process.on('SIGINT', cleanup);
+        process.on('SIGTERM', cleanup);
+
+        const connect = () => {
+          if (!running) return;
+          ws = new WebSocket(plan.wsUrl);
+          ws.addEventListener('open', () => { backoff = 1000; process.stderr.write('[market-stream] connected\n'); });
+          ws.addEventListener('message', (ev) => {
+            let m; try { m = JSON.parse(ev.data); } catch { return; }
+            emit(o.raw ? { stream: m.stream, raw: m.data || m } : core.formatMarketEvent(m));
+          });
+          ws.addEventListener('close', () => {
+            if (!running) return;
+            process.stderr.write(`[market-stream] disconnected — reconnecting in ${backoff}ms\n`);
+            setTimeout(connect, (backoff = Math.min(backoff * 2, 30000)));
+          });
+          ws.addEventListener('error', () => { /* a 'close' event follows; reconnect there */ });
+        };
+
+        connect();
+        await new Promise(() => {}); // never resolves — runs until Ctrl-C (matches `tv binance user-stream`)
+      },
+    }],
     ['orders', {
       description: 'List open orders',
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'Filter by symbol' }, account: accountOpt },
@@ -235,6 +289,24 @@ register('binance', {
       },
       handler: (o) => core.getIncome({
         market: o.market || 'futures', symbol: o.symbol, incomeType: o.incomeType,
+        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
+        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
+        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+      }),
+    }],
+    ['liquidation-history', {
+      description: "Forced-liquidation / ADL history (signed, futures only) — the user's own force-closed positions",
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'Filter by symbol (optional)' },
+        autoCloseType: { type: 'string', description: 'LIQUIDATION | ADL (omit for both)' },
+        startTime: { type: 'string', description: 'Start time in ms since epoch' },
+        endTime: { type: 'string', description: 'End time in ms since epoch' },
+        limit: { type: 'string', short: 'n', description: 'Max rows (default 50, max 100)' },
+        account: accountOpt,
+      },
+      handler: (o) => core.getLiquidationHistory({
+        market: o.market || 'futures', symbol: o.symbol, autoCloseType: o.autoCloseType,
         startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
         endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
         limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
@@ -390,6 +462,18 @@ register('binance', {
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDT', required: true } },
       handler: (o) => core.getTicker({ market: o.market || 'futures', symbol: o.symbol }),
     }],
+    ['watch-price', {
+      description: 'Watch live trades over a public WebSocket for a bounded window, then print a compact summary (OHLC + change, VWAP, volume, tick count). Bounded counterpart to the unbounded `stream` loop.',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        durationSec: { type: 'string', short: 'd', description: 'Seconds to watch (1-60, default 10)' },
+      },
+      handler: (o) => core.watchPrice({
+        market: o.market || 'futures', symbol: o.symbol,
+        durationSec: o.durationSec !== undefined ? Number(o.durationSec) : undefined,
+      }),
+    }],
     ['klines', {
       description: 'Candlesticks (OHLCV) for a symbol (public) — for the exact Binance contract, no chart needed',
       options: {
@@ -399,12 +483,14 @@ register('binance', {
         startTime: { type: 'string', description: 'Start time in ms since epoch' },
         endTime: { type: 'string', description: 'End time in ms since epoch' },
         limit: { type: 'string', short: 'n', description: 'Bars (spot max 1000, futures max 1500; default 500)' },
+        extended: { type: 'boolean', description: 'Also include per-bar order-flow fields (quoteVolume, trades, takerBuyVolume, takerBuyQuoteVolume)' },
       },
       handler: (o) => core.getKlines({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
         startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
         endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
         limit: o.limit !== undefined ? Number(o.limit) : undefined,
+        extended: !!o.extended,
       }),
     }],
     ['ticker-24hr', {
@@ -436,12 +522,14 @@ register('binance', {
         startTime: { type: 'string', description: 'Start time in ms since epoch' },
         endTime: { type: 'string', description: 'End time in ms since epoch' },
         limit: { type: 'string', short: 'n', description: 'Bars (max 1000; default 500)' },
+        extended: { type: 'boolean', description: 'Also include per-bar order-flow fields (quoteVolume, trades, takerBuyVolume, takerBuyQuoteVolume)' },
       },
       handler: (o) => core.getUiKlines({
         market: o.market || 'spot', symbol: o.symbol, interval: o.interval || '1h',
         startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
         endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
         limit: o.limit !== undefined ? Number(o.limit) : undefined,
+        extended: !!o.extended,
       }),
     }],
     ['trading-day', {
@@ -479,6 +567,41 @@ register('binance', {
       },
       handler: (o) => core.getRollingWindowTicker({ market: o.market || 'spot', symbol: o.symbol, symbols: o.symbols, windowSize: o.windowSize || '1d' }),
     }],
+    ['compare', {
+      description: 'Compare symbols side-by-side on 24h stats, ranked (--symbols CSV, --sortBy metric)',
+      options: {
+        market: marketOpt,
+        symbols: { type: 'string', description: 'CSV list to compare, e.g. "BTCUSDC,ETHUSDC,SOLUSDC"', required: true },
+        sortBy: { type: 'string', description: 'priceChangePercent (default) | priceChange | quoteVolume | volume | lastPrice' },
+      },
+      handler: (o) => core.compareSymbols({ market: o.market || 'futures', symbols: o.symbols, sortBy: o.sortBy || 'priceChangePercent' }),
+    }],
+    ['technicals', {
+      description: 'Technical indicators off klines (RSI/ATR/MACD/SMA/EMA/Bollinger/VWAP + trend classification) for the exact contract — no chart',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        interval: { type: 'string', short: 'i', description: '1m,5m,15m,1h,4h,1d,… (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'Bars to analyze (min 30; default 300)' },
+      },
+      handler: (o) => core.getTechnicals({
+        market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
+        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+      }),
+    }],
+    ['correlate', {
+      description: 'Deep multi-symbol analysis off klines: return/volatility/Sharpe/ATR%/RSI/trend per symbol + correlation matrix + rankings (--symbols CSV, capped at 10)',
+      options: {
+        market: marketOpt,
+        symbols: { type: 'string', description: 'CSV list to correlate, e.g. "BTCUSDC,ETHUSDC,SOLUSDC"', required: true },
+        interval: { type: 'string', short: 'i', description: '1m,5m,15m,1h,4h,1d,… (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'Bars per symbol (min 30; default 200)' },
+      },
+      handler: (o) => core.correlateSymbols({
+        market: o.market || 'futures', symbols: o.symbols, interval: o.interval || '1h',
+        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+      }),
+    }],
     ['depth', {
       description: 'Order book depth (public)',
       options: {
@@ -512,6 +635,22 @@ register('binance', {
         account: accountOpt,
       },
       handler: (o) => core.setMarginType({ market: o.market || 'futures', symbol: o.symbol, marginType: o.marginType, account: o.account }),
+    }],
+    ['adjust-margin', {
+      description: 'Add/remove margin on an ISOLATED futures position without closing it (DRY RUN unless --confirm)',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        amount: { type: 'string', short: 'a', description: 'Margin amount to move (> 0)', required: true },
+        direction: { type: 'string', short: 'd', description: "'add' (default) or 'remove'" },
+        positionSide: { type: 'string', description: 'Hedge mode: LONG | SHORT (defaults to BOTH in one-way)' },
+        account: accountOpt,
+        confirm: { type: 'boolean', description: 'REQUIRED to actually move margin' },
+      },
+      handler: (o) => core.adjustIsolatedMargin({
+        market: o.market || 'futures', symbol: o.symbol, amount: Number(o.amount),
+        direction: o.direction || 'add', positionSide: o.positionSide, account: o.account, confirm: !!o.confirm,
+      }),
     }],
     ['bracket', {
       description: 'Place entry + stop + take-profit(s) in one shot (DRY RUN unless --confirm)',
@@ -703,6 +842,53 @@ register('binance', {
         account: accountOpt,
       },
       handler: (o) => core.getTransferHistory({ from: o.from || 'futures', to: o.to || 'spot', size: o.size !== undefined ? Number(o.size) : undefined, account: o.account }),
+    }],
+    ['deposit-history', {
+      description: 'On-chain deposit history (signed, read-only)',
+      options: {
+        coin: { type: 'string', short: 'a', description: 'Asset, e.g. USDC (omit for all)' },
+        status: { type: 'string', description: 'Binance status code: 0 pending, 6 credited-cannot-withdraw, 1 success' },
+        startTime: { type: 'string', description: 'Start time in ms since epoch' },
+        endTime: { type: 'string', description: 'End time in ms since epoch' },
+        offset: { type: 'string' },
+        limit: { type: 'string', short: 'n', description: 'Max rows (default 100, max 1000)' },
+        account: accountOpt,
+      },
+      handler: (o) => core.getDepositHistory({
+        coin: o.coin, status: o.status !== undefined ? Number(o.status) : undefined,
+        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
+        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
+        offset: o.offset !== undefined ? Number(o.offset) : undefined,
+        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+      }),
+    }],
+    ['withdraw-history', {
+      description: 'Withdrawal history (signed, read-only)',
+      options: {
+        coin: { type: 'string', short: 'a', description: 'Asset, e.g. USDC (omit for all)' },
+        status: { type: 'string', description: 'Binance status code: 0 email-sent, 1 cancelled, 2 awaiting-approval, 4 processing, 5 failure, 6 completed' },
+        startTime: { type: 'string', description: 'Start time in ms since epoch' },
+        endTime: { type: 'string', description: 'End time in ms since epoch' },
+        offset: { type: 'string' },
+        limit: { type: 'string', short: 'n', description: 'Max rows (default 100, max 1000)' },
+        account: accountOpt,
+      },
+      handler: (o) => core.getWithdrawHistory({
+        coin: o.coin, status: o.status !== undefined ? Number(o.status) : undefined,
+        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
+        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
+        offset: o.offset !== undefined ? Number(o.offset) : undefined,
+        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+      }),
+    }],
+    ['deposit-address', {
+      description: 'Deposit address for a coin (signed, read-only)',
+      options: {
+        coin: { type: 'string', short: 'a', description: 'Asset, e.g. USDC', required: true },
+        network: { type: 'string', description: 'Network, e.g. BSC, ETH, TRX, BNB (omit for default)' },
+        account: accountOpt,
+      },
+      handler: (o) => core.getDepositAddress({ coin: o.coin, network: o.network, account: o.account }),
     }],
   ]),
 });
