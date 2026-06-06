@@ -5,6 +5,9 @@ node_modules/
 .env.local
 .env.*.local
 
+# Personal morning-brief config (watchlist/rules) — see rules.example.json for the template
+rules.json
+
 # Generated / runtime artifacts
 screenshots/
 scripts/current.pine
