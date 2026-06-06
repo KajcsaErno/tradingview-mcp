@@ -13,9 +13,12 @@ import {
   setLeverage, setMarginType, getOrder, getAccountTrades, cancelOrder, getHistoricalTrades,
   getKlines, get24hrTicker, getBookTicker, getAvgPrice, getRollingWindowTicker,
   setPositionMode, modifyOrder, getOrderHistory, getLeverageBrackets, getAccountSummary,
-  placeLadder, ensureProtectiveStop, getFundingRate, getIncome, getAccountSnapshot,
+  placeLadder, ensureProtectiveStop, adjustIsolatedMargin, getFundingRate, getIncome, getAccountSnapshot,
   calcPositionSize, getRiskReport,
   getUiKlines, getTradingDayTicker, startUserStream, keepAliveUserStream, closeUserStream,
+  watchPrice, compareSymbols, buildMarketStream, formatMarketEvent,
+  getLiquidationHistory, getDepositHistory, getWithdrawHistory, getDepositAddress,
+  getTechnicals, correlateSymbols,
 } from '../src/core/binance.js';
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -588,6 +591,31 @@ describe('account routing — signed calls use the requested account, not "1"', 
     assert.deepEqual(seen, ['2']);
   });
 
+  it('getLiquidationHistory', async () => {
+    const { _deps, seen, headers } = routingDeps({ forceOrders: [] });
+    await getLiquidationHistory({ market: 'futures', symbol: 'BTCUSDC', account: '2', _deps });
+    assert.deepEqual(seen, ['2']);
+    assert.ok(headers.includes('K_2'));
+  });
+
+  it('getDepositHistory', async () => {
+    const { _deps, seen } = routingDeps({ 'capital/deposit/hisrec': [] });
+    await getDepositHistory({ coin: 'USDC', account: '2', _deps });
+    assert.deepEqual(seen, ['2']);
+  });
+
+  it('getWithdrawHistory', async () => {
+    const { _deps, seen } = routingDeps({ 'capital/withdraw/history': [] });
+    await getWithdrawHistory({ coin: 'USDC', account: '2', _deps });
+    assert.deepEqual(seen, ['2']);
+  });
+
+  it('getDepositAddress', async () => {
+    const { _deps, seen } = routingDeps({ 'capital/deposit/address': { coin: 'USDC', address: '0xabc', tag: '', url: '' } });
+    await getDepositAddress({ coin: 'USDC', account: '2', _deps });
+    assert.deepEqual(seen, ['2']);
+  });
+
   it('placeOrder still routes account on confirm (regression guard)', async () => {
     const { _deps, seen } = routingDeps({ 'positionSide/dual': { dualSidePosition: false } });
     await placeOrder({ market: 'futures', symbol: 'BTCUSDC', side: 'BUY', type: 'LIMIT', quantity: 0.01, price: 60000, account: '2', confirm: true, _deps });
@@ -608,6 +636,19 @@ describe('market data — klines / tickers (public)', () => {
       openTime: 1700000000000, open: '60000', high: '60500', low: '59800', close: '60200', volume: '12.5', closeTime: 1700003599999,
     });
     assert.match(_deps.fetch.calls[0].url, /\/fapi\/v1\/klines/);
+  });
+
+  it('getKlines extended:true surfaces order-flow columns (and omits them by default)', async () => {
+    const row = [1700000000000, '60000', '60500', '59800', '60200', '12.5', 1700003599999, '750000', 100, '6', '360000', '0'];
+    const _plain = deps({ klines: [row] });
+    const plain = await getKlines({ market: 'futures', symbol: 'BTCUSDC', _deps: _plain });
+    assert.equal(plain.candles[0].quoteVolume, undefined);
+    const _ext = deps({ klines: [row] });
+    const ext = await getKlines({ market: 'futures', symbol: 'BTCUSDC', extended: true, _deps: _ext });
+    assert.deepEqual(ext.candles[0], {
+      openTime: 1700000000000, open: '60000', high: '60500', low: '59800', close: '60200', volume: '12.5', closeTime: 1700003599999,
+      quoteVolume: '750000', trades: 100, takerBuyVolume: '6', takerBuyQuoteVolume: '360000',
+    });
   });
 
   it('getKlines rejects an invalid interval', async () => {
@@ -902,6 +943,51 @@ describe('getIncome', () => {
   });
 });
 
+describe('getLiquidationHistory', () => {
+  it('hits forceOrders with symbol + capped limit', async () => {
+    const _deps = deps({ forceOrders: [{ symbol: 'BTCUSDC', side: 'SELL', type: 'LIMIT', origQty: '0.5', avgPrice: '60000' }] });
+    const r = await getLiquidationHistory({ market: 'futures', symbol: 'BTCUSDC', limit: 999, _deps });
+    assert.equal(r.count, 1);
+    assert.match(_deps.fetch.calls[0].url, /\/fapi\/v1\/forceOrders/);
+    assert.match(_deps.fetch.calls[0].url, /symbol=BTCUSDC/);
+    assert.match(_deps.fetch.calls[0].url, /limit=100/); // clamped to the 100 max
+  });
+  it('passes autoCloseType and routes COIN-M to /dapi', async () => {
+    const _deps = deps({ forceOrders: [] });
+    await getLiquidationHistory({ market: 'coinm', autoCloseType: 'liquidation', _deps });
+    assert.match(_deps.fetch.calls[0].url, /\/dapi\/v1\/forceOrders/);
+    assert.match(_deps.fetch.calls[0].url, /autoCloseType=LIQUIDATION/);
+  });
+  it('rejects a bad autoCloseType and is futures-only', async () => {
+    await assert.rejects(getLiquidationHistory({ market: 'futures', autoCloseType: 'nope', _deps: deps() }), /autoCloseType must be/);
+    await assert.rejects(getLiquidationHistory({ market: 'spot', _deps: deps() }), /futures-only/);
+  });
+});
+
+describe('wallet history / address (SAPI, spot host)', () => {
+  it('getDepositHistory hits capital/deposit/hisrec on the spot host', async () => {
+    const _deps = deps({ 'capital/deposit/hisrec': [{ coin: 'USDC', amount: '100', status: 1 }] });
+    const r = await getDepositHistory({ coin: 'usdc', _deps });
+    assert.equal(r.count, 1);
+    assert.match(_deps.fetch.calls[0].url, /api\.binance\.com\/sapi\/v1\/capital\/deposit\/hisrec/);
+    assert.match(_deps.fetch.calls[0].url, /coin=USDC/);
+  });
+  it('getWithdrawHistory hits capital/withdraw/history', async () => {
+    const _deps = deps({ 'capital/withdraw/history': [] });
+    const r = await getWithdrawHistory({ _deps });
+    assert.equal(r.count, 0);
+    assert.match(_deps.fetch.calls[0].url, /\/sapi\/v1\/capital\/withdraw\/history/);
+  });
+  it('getDepositAddress returns address fields and requires coin', async () => {
+    const _deps = deps({ 'capital/deposit/address': { coin: 'USDC', address: '0xabc', tag: '', url: 'https://x', network: 'ETH' } });
+    const r = await getDepositAddress({ coin: 'USDC', network: 'eth', _deps });
+    assert.equal(r.address, '0xabc');
+    assert.equal(r.network, 'ETH');
+    assert.match(_deps.fetch.calls[0].url, /\/sapi\/v1\/capital\/deposit\/address/);
+    await assert.rejects(getDepositAddress({ _deps: deps() }), /coin is required/);
+  });
+});
+
 describe('getAccountSnapshot', () => {
   it('aggregates summary + positions + open-order counts', async () => {
     const _deps = deps({
@@ -947,6 +1033,50 @@ describe('ensureProtectiveStop', () => {
     const r = await ensureProtectiveStop({ market: 'futures', symbol: 'BTCUSDC', stop: 58900, _deps });
     assert.equal(r.success, false);
     assert.match(r.warning, /no open position/);
+  });
+});
+
+// ── isolated-margin adjustment (borrowed from muvon/mcp-binance-futures) ──────
+describe('adjustIsolatedMargin', () => {
+  it('dry-run previews type=1 (add) and sends nothing', async () => {
+    const _deps = deps();
+    const r = await adjustIsolatedMargin({ market: 'futures', symbol: 'BTCUSDC', amount: 25, direction: 'add', _deps });
+    assert.equal(r.dry_run, true);
+    assert.equal(r.margin_preview.type, '1');
+    assert.equal(r.margin_preview.amount, '25');
+    assert.match(r.margin_preview.endpoint, /\/fapi\/v1\/positionMargin/);
+    assert.equal(posts(_deps.fetch).length, 0);
+  });
+  it('confirm POSTs type=2 (remove) to positionMargin', async () => {
+    const _deps = deps({ positionMargin: { code: 200, msg: 'success', amount: 25, type: 2 } });
+    const r = await adjustIsolatedMargin({ market: 'futures', symbol: 'BTCUSDC', amount: 25, direction: 'remove', positionSide: 'LONG', confirm: true, _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.action, 'remove');
+    assert.equal(r.positionSide, 'LONG');
+    const p = posts(_deps.fetch);
+    assert.equal(p.length, 1);
+    assert.match(p[0].url, /\/fapi\/v1\/positionMargin/);
+    assert.match(p[0].url, /type=2/);
+    assert.match(p[0].url, /positionSide=LONG/);
+  });
+  it('COIN-M routes to /dapi', async () => {
+    const _deps = deps({ positionMargin: { code: 200 } });
+    await adjustIsolatedMargin({ market: 'coinm', symbol: 'BTCUSD_PERP', amount: 1, positionSide: 'SHORT', confirm: true, _deps });
+    assert.match(posts(_deps.fetch)[0].url, /\/dapi\/v1\/positionMargin/);
+  });
+  it('throws on confirm in Hedge Mode when positionSide is omitted', async () => {
+    const _deps = deps({ 'positionSide/dual': { dualSidePosition: true } });
+    await assert.rejects(
+      adjustIsolatedMargin({ market: 'futures', symbol: 'BTCUSDC', amount: 25, confirm: true, _deps }),
+      /Hedge Mode/,
+    );
+  });
+  it('rejects a non-positive amount and a bad direction', async () => {
+    await assert.rejects(adjustIsolatedMargin({ symbol: 'BTCUSDC', amount: 0, _deps: deps() }), /amount must be > 0/);
+    await assert.rejects(adjustIsolatedMargin({ symbol: 'BTCUSDC', amount: 5, direction: 'sideways', _deps: deps() }), /direction must be/);
+  });
+  it('is futures-only', async () => {
+    await assert.rejects(adjustIsolatedMargin({ market: 'spot', symbol: 'BTCUSDC', amount: 5, _deps: deps() }), /futures-only/);
   });
 });
 
@@ -1010,5 +1140,408 @@ describe('signedRequest — rate-limit backoff', () => {
     assert.equal(r.success, true);
     assert.equal(r.count, 1);
     assert.equal(n, 2); // one 429, one success
+  });
+});
+
+// ── watchPrice — bounded WebSocket capture ──────────────────────────────────
+// Fake WebSocket: delivers `messages` then optionally a close, all on a microtask.
+function makeWS({ messages = [], closeAfter = true } = {}) {
+  const seen = { url: null };
+  const cls = class {
+    constructor(url) {
+      seen.url = url;
+      this._l = {};
+      queueMicrotask(() => {
+        for (const data of messages) (this._l.message || []).forEach((cb) => cb({ data: JSON.stringify(data) }));
+        if (closeAfter) (this._l.close || []).forEach((cb) => cb());
+      });
+    }
+    addEventListener(ev, cb) { (this._l[ev] ||= []).push(cb); }
+    close() {}
+  };
+  return { cls, seen };
+}
+// Timer deps that never auto-fire — the fake socket's close drives resolution.
+const inertTimers = { setTimeout: () => 0, clearTimeout: () => {} };
+
+describe('watchPrice', () => {
+  it('subscribes to the lowercase <symbol>@aggTrade stream on the futures host', async () => {
+    const { cls, seen } = makeWS({ messages: [{ p: '64800.0', q: '1', T: 1 }] });
+    await watchPrice({ market: 'futures', symbol: 'BTCUSDC', _deps: { WebSocket: cls, ...inertTimers } });
+    assert.equal(seen.url, 'wss://fstream.binance.com/ws/btcusdc@aggTrade');
+  });
+
+  it('summarizes OHLC, change, VWAP and volume from the captured ticks', async () => {
+    const messages = [
+      { p: '100', q: '2', T: 10 },
+      { p: '110', q: '1', T: 20 },
+      { p: '90', q: '1', T: 30 },
+      { p: '105', q: '2', T: 40 },
+    ];
+    const { cls } = makeWS({ messages });
+    const r = await watchPrice({ market: 'spot', symbol: 'btcusdt', durationSec: 5, _deps: { WebSocket: cls, ...inertTimers } });
+    assert.equal(r.success, true);
+    assert.equal(r.symbol, 'BTCUSDT');
+    assert.equal(r.ticks, 4);
+    assert.equal(r.open, 100);
+    assert.equal(r.close, 105);
+    assert.equal(r.high, 110);
+    assert.equal(r.low, 90);
+    assert.equal(r.change, 5);
+    assert.equal(r.changePct, '5.0000%');
+    assert.equal(r.volume, 6);
+    // VWAP = (100*2 + 110*1 + 90*1 + 105*2) / 6 = 610/6 ≈ 101.66666667
+    assert.equal(r.vwap, 101.66666667);
+    assert.equal(r.firstTradeTime, 10);
+    assert.equal(r.lastTradeTime, 40);
+  });
+
+  it('clamps durationSec to [1,60]', async () => {
+    const { cls } = makeWS({ messages: [{ p: '1', q: '1', T: 1 }] });
+    const hi = await watchPrice({ symbol: 'BTCUSDC', durationSec: 999, _deps: { WebSocket: cls, ...inertTimers } });
+    assert.equal(hi.durationSec, 60);
+    const lo = await watchPrice({ symbol: 'BTCUSDC', durationSec: 0, _deps: { WebSocket: cls, ...inertTimers } });
+    assert.equal(lo.durationSec, 10); // 0 -> falls back to default 10
+  });
+
+  it('returns a note (not an error) when no trades arrive before the window ends', async () => {
+    const { cls } = makeWS({ messages: [], closeAfter: false });
+    // setTimeout fires immediately to end the empty window.
+    const r = await watchPrice({ symbol: 'BTCUSDC', _deps: { WebSocket: cls, setTimeout: (fn) => { fn(); return 0; }, clearTimeout: () => {} } });
+    assert.equal(r.success, true);
+    assert.equal(r.ticks, 0);
+    assert.match(r.note, /No trades observed/);
+    assert.equal(r.open, undefined);
+  });
+
+  it('rejects an unknown market', async () => {
+    const { cls } = makeWS();
+    await assert.rejects(
+      watchPrice({ market: 'nope', symbol: 'BTCUSDC', _deps: { WebSocket: cls, ...inertTimers } }),
+      /unknown market/,
+    );
+  });
+});
+
+// ── buildMarketStream — combined public-stream URL builder ──────────────────
+describe('buildMarketStream', () => {
+  it('builds a multiplexed combined-stream URL (symbols × streams) on the futures host', () => {
+    const r = buildMarketStream({ market: 'futures', symbols: 'BTCUSDC,ETHUSDC', streams: 'trade,bookTicker' });
+    assert.equal(r.success, true);
+    assert.deepEqual(r.subscriptions, ['btcusdc@trade', 'btcusdc@bookTicker', 'ethusdc@trade', 'ethusdc@bookTicker']);
+    assert.equal(r.wsUrl, 'wss://fstream.binance.com/stream?streams=btcusdc@trade/btcusdc@bookTicker/ethusdc@trade/ethusdc@bookTicker');
+  });
+
+  it('accepts arrays, uppercases symbols, and de-duplicates subscriptions', () => {
+    const r = buildMarketStream({ market: 'spot', symbols: ['btcusdt', 'BTCUSDT'], streams: ['trade', 'trade'] });
+    assert.deepEqual(r.symbols, ['BTCUSDT']);
+    assert.deepEqual(r.subscriptions, ['btcusdt@trade']);
+    assert.match(r.wsUrl, /^wss:\/\/stream\.binance\.com:9443\/stream\?streams=btcusdt@trade$/);
+  });
+
+  it('maps kline[:interval] (default 1m) and folds funding into the markPrice stream', () => {
+    const r = buildMarketStream({ market: 'futures', symbols: 'BTCUSDC', streams: 'kline:5m,kline,markPrice,funding' });
+    assert.deepEqual(r.subscriptions, ['btcusdc@kline_5m', 'btcusdc@kline_1m', 'btcusdc@markPrice@1s']);
+  });
+
+  it('rejects markPrice/funding on spot (futures-only) and unknown stream kinds', () => {
+    assert.throws(() => buildMarketStream({ market: 'spot', symbols: 'BTCUSDT', streams: 'markPrice' }), /futures-only/);
+    assert.throws(() => buildMarketStream({ market: 'spot', symbols: 'BTCUSDT', streams: 'funding' }), /futures-only/);
+    assert.throws(() => buildMarketStream({ market: 'futures', symbols: 'BTCUSDC', streams: 'depth' }), /unknown stream/);
+  });
+
+  it('requires symbols and an unknown market throws', () => {
+    assert.throws(() => buildMarketStream({ market: 'futures', symbols: '', streams: 'trade' }), /symbols is required/);
+    assert.throws(() => buildMarketStream({ market: 'nope', symbols: 'BTCUSDC' }), /unknown market/);
+  });
+});
+
+// ── formatMarketEvent — compact normalization of stream payloads ────────────
+describe('formatMarketEvent', () => {
+  it('unwraps the combined-stream envelope and normalizes a trade', () => {
+    const e = formatMarketEvent({ stream: 'btcusdc@trade', data: { e: 'trade', s: 'BTCUSDC', p: '64800.0', q: '0.5', T: 10, m: true } });
+    assert.deepEqual(e, { event: 'trade', symbol: 'BTCUSDC', price: 64800, qty: 0.5, time: 10, buyerMaker: true });
+  });
+
+  it('normalizes a 24hrTicker into a compact ticker line', () => {
+    const e = formatMarketEvent({ data: { e: '24hrTicker', s: 'BTCUSDC', c: '65000', P: '1.5', h: '66000', l: '64000', v: '100', q: '6500000' } });
+    assert.deepEqual(e, { event: 'ticker', symbol: 'BTCUSDC', last: 65000, changePct: 1.5, high: 66000, low: 64000, volume: 100, quoteVolume: 6500000 });
+  });
+
+  it('normalizes a markPriceUpdate including the funding rate', () => {
+    const e = formatMarketEvent({ data: { e: 'markPriceUpdate', s: 'BTCUSDC', p: '64810', i: '64800', r: '0.0001', T: 200, E: 100 } });
+    assert.deepEqual(e, { event: 'markPrice', symbol: 'BTCUSDC', mark: 64810, index: 64800, fundingRate: 0.0001, nextFundingTime: 200, time: 100 });
+  });
+
+  it('normalizes a kline event from its k sub-object', () => {
+    const e = formatMarketEvent({ data: { e: 'kline', s: 'BTCUSDC', k: { i: '1m', o: '1', h: '3', l: '0.5', c: '2', v: '10', x: true, t: 1, T: 2 } } });
+    assert.deepEqual(e, { event: 'kline', symbol: 'BTCUSDC', interval: '1m', open: 1, high: 3, low: 0.5, close: 2, volume: 10, closed: true, openTime: 1, closeTime: 2 });
+  });
+
+  it('detects spot bookTicker (no e field) by its b/a/s shape', () => {
+    const e = formatMarketEvent({ data: { u: 1, s: 'BTCUSDT', b: '64999', B: '1', a: '65001', A: '2' } });
+    assert.equal(e.event, 'bookTicker');
+    assert.equal(e.bid, 64999);
+    assert.equal(e.ask, 65001);
+  });
+
+  it('falls back to {event,stream,raw} for unrecognized events', () => {
+    const e = formatMarketEvent({ stream: 'btcusdc@forceOrder', data: { e: 'forceOrder', o: {} } });
+    assert.equal(e.event, 'forceOrder');
+    assert.equal(e.stream, 'btcusdc@forceOrder');
+    assert.ok(e.raw);
+  });
+});
+
+// ── compareSymbols — ranked multi-symbol comparison ─────────────────────────
+// A fetch that returns per-symbol 24hr stats keyed on the URL's symbol= param.
+function compareFetch(bySymbol) {
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    const m = url.match(/symbol=([A-Z0-9]+)/);
+    const sym = m ? m[1] : null;
+    if (url.includes('ticker/24hr') && sym && bySymbol[sym]) {
+      return { ok: true, status: 200, json: async () => ({ symbol: sym, ...bySymbol[sym] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+describe('compareSymbols', () => {
+  it('ranks by priceChangePercent (descending) with leader/laggard', async () => {
+    const fetch = compareFetch({
+      BTCUSDC: { lastPrice: '60000', priceChangePercent: '2.5', quoteVolume: '100' },
+      ETHUSDC: { lastPrice: '3000', priceChangePercent: '-1.0', quoteVolume: '300' },
+      SOLUSDC: { lastPrice: '150', priceChangePercent: '5.2', quoteVolume: '200' },
+    });
+    const r = await compareSymbols({ market: 'futures', symbols: 'BTCUSDC,ETHUSDC,SOLUSDC', _deps: { fetch } });
+    assert.equal(r.count, 3);
+    assert.equal(r.sortBy, 'priceChangePercent');
+    assert.deepEqual(r.comparison.map((x) => x.symbol), ['SOLUSDC', 'BTCUSDC', 'ETHUSDC']);
+    assert.deepEqual(r.comparison.map((x) => x.rank), [1, 2, 3]);
+    assert.equal(r.leader, 'SOLUSDC');
+    assert.equal(r.laggard, 'ETHUSDC');
+  });
+
+  it('sorts by quoteVolume when requested', async () => {
+    const fetch = compareFetch({
+      BTCUSDC: { priceChangePercent: '2.5', quoteVolume: '100' },
+      ETHUSDC: { priceChangePercent: '-1.0', quoteVolume: '300' },
+    });
+    const r = await compareSymbols({ market: 'futures', symbols: ['BTCUSDC', 'ETHUSDC'], sortBy: 'quoteVolume', _deps: { fetch } });
+    assert.equal(r.sortBy, 'quoteVolume');
+    assert.deepEqual(r.comparison.map((x) => x.symbol), ['ETHUSDC', 'BTCUSDC']);
+  });
+
+  it('unknown sortBy falls back to priceChangePercent and dedupes symbols', async () => {
+    const fetch = compareFetch({ BTCUSDC: { priceChangePercent: '1' } });
+    const r = await compareSymbols({ symbols: 'BTCUSDC,btcusdc', sortBy: 'nope', _deps: { fetch } });
+    assert.equal(r.sortBy, 'priceChangePercent');
+    assert.equal(r.count, 1); // deduped (case-insensitive)
+  });
+
+  it('requires at least one symbol', async () => {
+    await assert.rejects(compareSymbols({ symbols: '', _deps: { fetch: compareFetch({}) } }), /symbols is required/);
+    await assert.rejects(compareSymbols({ _deps: { fetch: compareFetch({}) } }), /symbols is required/);
+  });
+});
+
+// ── testnet switch ───────────────────────────────────────────────────────────
+// The global BINANCE_TESTNET flag routes every market to its testnet host (and uses
+// TESTNET credentials). _deps.testnet overrides the env for deterministic unit tests.
+describe('testnet switch', () => {
+  it('routes a public read to the testnet host with _deps.testnet', async () => {
+    const _deps = { ...deps(), testnet: true };
+    await getTicker({ market: 'futures', symbol: 'BTCUSDC', _deps });
+    assert.match(_deps.fetch.calls[0].url, /testnet\.binancefuture\.com/);
+  });
+
+  it('routes a signed read to the testnet host', async () => {
+    const _deps = { ...deps({ balance: [] }), testnet: true };
+    await getBalance({ market: 'futures', _deps });
+    const call = _deps.fetch.calls.find((c) => c.url.includes('/fapi/v2/balance'));
+    assert.match(call.url, /testnet\.binancefuture\.com/);
+  });
+
+  it('uses the mainnet host without the switch', async () => {
+    const _deps = deps();
+    await getTicker({ market: 'futures', symbol: 'BTCUSDC', _deps });
+    assert.match(_deps.fetch.calls[0].url, /fapi\.binance\.com/);
+    assert.ok(!_deps.fetch.calls[0].url.includes('testnet'));
+  });
+
+  it('placeOrder dry-run reports live_funds:false under the switch', async () => {
+    const _deps = { ...deps(), testnet: true };
+    const r = await placeOrder({ market: 'futures', symbol: 'BTCUSDC', side: 'SELL', type: 'LIMIT', quantity: 1, price: 64800, _deps });
+    assert.equal(r.order_preview.live_funds, false);
+  });
+
+  it('getServerTime reports the testnet flag and routes to the testnet host', async () => {
+    const _deps = { ...deps({ time: { serverTime: 1700000000000 } }), testnet: true };
+    const r = await getServerTime({ market: 'futures', _deps });
+    assert.equal(r.testnet, true);
+    assert.match(_deps.fetch.calls.find((c) => c.url.includes('/v1/time')).url, /testnet\.binancefuture\.com/);
+  });
+
+  it('an explicit *-testnet market routes to testnet even without the global switch', async () => {
+    const _deps = deps();
+    await getTicker({ market: 'futures-testnet', symbol: 'BTCUSDC', _deps });
+    assert.match(_deps.fetch.calls[0].url, /testnet\.binancefuture\.com/);
+  });
+
+  it('BINANCE_TESTNET env reads TESTNET credentials and routes to the testnet host', async () => {
+    const saved = {
+      flag: process.env.BINANCE_TESTNET, key: process.env.BINANCE_TESTNET_API_KEY, secret: process.env.BINANCE_TESTNET_API_SECRET,
+    };
+    process.env.BINANCE_TESTNET = '1';
+    process.env.BINANCE_TESTNET_API_KEY = 'tk';
+    process.env.BINANCE_TESTNET_API_SECRET = 'ts';
+    try {
+      const base = mockFetch({ balance: [] });
+      const headers = [];
+      const fetch = async (url, opts = {}) => { headers.push(opts.headers?.['X-MBX-APIKEY']); return base(url, opts); };
+      fetch.calls = base.calls;
+      await getBalance({ market: 'futures', _deps: { fetch, now: () => 1700000000000 } });
+      assert.ok(headers.includes('tk')); // signed with the TESTNET key, not BINANCE_API_KEY
+      assert.match(fetch.calls.find((c) => c.url.includes('balance')).url, /testnet\.binancefuture\.com/);
+    } finally {
+      for (const [k, v] of [['BINANCE_TESTNET', saved.flag], ['BINANCE_TESTNET_API_KEY', saved.key], ['BINANCE_TESTNET_API_SECRET', saved.secret]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
+  });
+});
+
+// ── Technical analysis (computed off klines) ─────────────────────────────────
+// Build deterministic positional klines: [openTime, open, high, low, close, volume, closeTime, …].
+// `fn(i)` drives the close; high/low straddle it. No Math.random — fully reproducible.
+function genKlines(n, fn) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const c = fn(i);
+    out.push([i * 3600000, String(c), String(c + 50), String(c - 50), String(c), '10', i * 3600000 + 1, '600000', 50, '5', '300000', '0']);
+  }
+  return out;
+}
+
+describe('getTechnicals — indicators off klines', () => {
+  it('computes RSI/ATR/MACD/SMA/EMA/Bollinger/VWAP and classifies an uptrend', async () => {
+    const _deps = deps({ klines: genKlines(120, (i) => 60000 + i * 30 + i * i * 0.4) }); // accelerating uptrend → +MACD hist
+    const r = await getTechnicals({ market: 'futures', symbol: 'BTCUSDC', interval: '1h', _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.bars, 120);
+    assert.equal(typeof r.atr, 'number');
+    assert.ok(r.atr > 0);
+    assert.ok(r.rsi >= 0 && r.rsi <= 100);
+    assert.equal(typeof r.macd.hist, 'number');
+    assert.equal(typeof r.sma['20'], 'number');
+    assert.equal(typeof r.sma['50'], 'number');
+    assert.equal(typeof r.ema['12'], 'number');
+    assert.ok(r.bollinger.upper > r.bollinger.lower);
+    assert.equal(typeof r.vwap, 'number');
+    assert.equal(r.classification.trend, 'bullish'); // rising price + positive MACD hist
+    assert.match(_deps.fetch.calls.find((c) => c.url.includes('klines')).url, /\/fapi\/v1\/klines/);
+  });
+
+  it('returns null indicators (not an error) when there are too few bars', async () => {
+    const _deps = deps({ klines: genKlines(10, (i) => 100 + i) }); // < periods for ATR/MACD/SMA50
+    const r = await getTechnicals({ market: 'futures', symbol: 'BTCUSDC', _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.atr, null);
+    assert.equal(r.macd, null);
+    assert.equal(r.sma, null); // SMA20 needs 20 bars
+  });
+
+  it('requires a symbol', async () => {
+    await assert.rejects(getTechnicals({ market: 'futures', _deps: deps() }), /symbol is required/);
+  });
+});
+
+describe('calcPositionSize — ATR-derived stop', () => {
+  it('derives a LONG stop below entry from ATR and sizes off it', async () => {
+    const _deps = deps({ klines: genKlines(120, (i) => 60000 + i * 50) });
+    const r = await calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 66000, side: 'BUY', atrMult: 1.5, riskAmount: 100, _deps });
+    assert.equal(r.atrStop.source, 'ATR');
+    assert.equal(r.atrStop.atrMult, 1.5);
+    assert.ok(r.atrStop.atr > 0);
+    assert.ok(r.stop < 66000); // long → stop sits below entry
+    assert.ok(r.quantity > 0);
+    assert.equal(r.side, 'LONG (BUY)');
+  });
+
+  it('derives a SHORT stop above entry', async () => {
+    const _deps = deps({ klines: genKlines(120, (i) => 60000 + i * 50) });
+    const r = await calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 66000, side: 'SELL', atrMult: 2, riskAmount: 100, _deps });
+    assert.ok(r.stop > 66000);
+  });
+
+  it('rejects an ATR stop without a side', async () => {
+    const _deps = deps({ klines: genKlines(120, (i) => 60000 + i * 50) });
+    await assert.rejects(calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 66000, atrMult: 1.5, riskAmount: 100, _deps }), /side/);
+  });
+
+  it('rejects when neither stop nor atrMult is given', async () => {
+    await assert.rejects(calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 66000, riskAmount: 100, _deps: deps() }), /pass stop, or atrMult/);
+  });
+
+  it('still works with an explicit stop (no ATR, no klines call)', async () => {
+    const _deps = deps();
+    const r = await calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 66000, stop: 65000, riskAmount: 100, _deps });
+    assert.equal(r.atrStop, undefined);
+    assert.equal(r.stop, 65000);
+    assert.equal(_deps.fetch.calls.filter((c) => c.url.includes('klines')).length, 0);
+  });
+});
+
+describe('correlateSymbols — correlation + rankings off klines', () => {
+  // Per-symbol klines: BTC and ETH rise together (corr≈1); INV mirrors BTC (corr≈-1).
+  function corrDeps() {
+    const series = {
+      BTCUSDC: (i) => 60000 + i * 50 + Math.sin(i / 5) * 100,
+      ETHUSDC: (i) => 3000 + i * 3 + Math.sin(i / 5) * 6,
+      INVUSDC: (i) => 60000 - i * 50 - Math.sin(i / 5) * 100,
+    };
+    const fetch = async (url) => {
+      if (url.includes('exchangeInfo')) return { ok: true, status: 200, json: async () => FILTERS };
+      if (url.includes('klines')) {
+        const m = url.match(/symbol=([A-Z]+)/);
+        const fn = series[m && m[1]] || series.BTCUSDC;
+        return { ok: true, status: 200, json: async () => genKlines(120, fn) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+    fetch.calls = [];
+    const wrapped = async (u, o) => { fetch.calls.push({ url: u }); return fetch(u, o); };
+    wrapped.calls = fetch.calls;
+    return { fetch: wrapped, keys: { key: 'k', secret: 's' }, now: () => 1700000000000 };
+  }
+
+  it('returns per-symbol stats, a correlation matrix and rankings', async () => {
+    const r = await correlateSymbols({ market: 'futures', symbols: 'BTCUSDC,ETHUSDC,INVUSDC', interval: '1h', _deps: corrDeps() });
+    assert.equal(r.success, true);
+    assert.equal(r.count, 3);
+    assert.equal(r.symbols[0].symbol, 'BTCUSDC');
+    assert.equal(typeof r.symbols[0].volatilityPct, 'number');
+    assert.equal(typeof r.symbols[0].sharpe, 'number');
+    // diagonal is 1
+    assert.equal(r.correlation.matrix[0][0], 1);
+    // BTC vs ETH (both rising) strongly positive; BTC vs INV (mirror) strongly negative
+    const idx = (s) => r.correlation.symbols.indexOf(s);
+    assert.ok(r.correlation.matrix[idx('BTCUSDC')][idx('ETHUSDC')] > 0.8);
+    assert.ok(r.correlation.matrix[idx('BTCUSDC')][idx('INVUSDC')] < -0.8);
+    assert.equal(r.rankings.byReturn.length, 3);
+    assert.equal(r.rankings.byVolatility.length, 3);
+  });
+
+  it('accepts an array and dedupes/caps, reports per-symbol fetch errors inline', async () => {
+    const r = await correlateSymbols({ market: 'futures', symbols: ['BTCUSDC', 'ETHUSDC'], _deps: corrDeps() });
+    assert.equal(r.count, 2);
+  });
+
+  it('requires at least two symbols', async () => {
+    await assert.rejects(correlateSymbols({ market: 'futures', symbols: 'BTCUSDC', _deps: deps() }), /at least two symbols/);
   });
 });

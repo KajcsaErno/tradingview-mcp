@@ -70,13 +70,13 @@ assert(js.includes('"\\u0027); alert('));  // Verify it's escaped
 
 ## Binance module (separate integration — NOT CDP)
 
-`src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`, or `KNOWN_PATHS`. It is fully wired through all three layers (45 tools / 45 CLI subcommands):
+`src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`, or `KNOWN_PATHS`. It is fully wired through all three layers (54 tools / 56 CLI subcommands):
 
 - **Core:** `src/core/binance.js`
 - **MCP:** `src/tools/binance.js` — `registerBinanceTools(server)`, registered in `src/server.js`. (Binance **is** exposed over MCP.)
 - **CLI:** `src/cli/commands/binance.js` — `npm run tv -- binance <subcommand>`.
 
-**DI shape differs from the CDP modules:** instead of `{ evaluate, waitForChartReady }`, Binance functions take `_deps = { fetch, now, keys, sleep }`. Tests in `tests/binance.test.js` inject these (a mock `fetch`, fixed `now`, fake `keys`, and a no-op `sleep`) to assert on the exact requests built — **no network, no real keys**. Run `npm run test:binance` (104 tests).
+**DI shape differs from the CDP modules:** instead of `{ evaluate, waitForChartReady }`, Binance functions take `_deps = { fetch, now, keys, sleep }`. Tests in `tests/binance.test.js` inject these (a mock `fetch`, fixed `now`, fake `keys`, and a no-op `sleep`) to assert on the exact requests built — **no network, no real keys**. Run `npm run test:binance` (159 tests).
 
 **Invariants every Binance contributor must preserve:**
 - **Credentials:** `BINANCE_API_KEY`/`BINANCE_API_SECRET` (account "1"), plus `_2`/`_3`… for more accounts, from the environment or a gitignored `.env` (minimal loader, never overwrites existing env vars). See `.env.example`.
