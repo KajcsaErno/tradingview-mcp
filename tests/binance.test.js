@@ -15,6 +15,7 @@ import {
   setPositionMode, modifyOrder, getOrderHistory, getLeverageBrackets, getAccountSummary,
   placeLadder, ensureProtectiveStop, getFundingRate, getIncome, getAccountSnapshot,
   calcPositionSize, getRiskReport,
+  getUiKlines, getTradingDayTicker, startUserStream, keepAliveUserStream, closeUserStream,
 } from '../src/core/binance.js';
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -765,6 +766,20 @@ describe('placeLadder', () => {
     assert.ok(r.ladder_preview.impliedAccountLeverage > 3);
     assert.ok((r.ladder_preview.warnings || []).some((w) => /3x rule/.test(w)));
   });
+  it('seed "min" resolves to the exchange minimum (minQty / minNotional)', async () => {
+    // BTCUSDC mock: minQty 0.001, minNotional 50, stepSize 0.001. At ~60k, minQty alone clears notional.
+    const _deps = deps({ bookTicker: { symbol: 'BTCUSDC', bidPrice: '60000', askPrice: '60001' } });
+    const r = await placeLadder({ market: 'futures', symbol: 'BTCUSDC', side: 'SELL', lo: 61500, hi: 66400, count: 50, totalNotional: 50000, positionSide: 'SHORT', seedQuantity: 'min', stop: 67750, _deps });
+    assert.equal(r.ladder_preview.seed.quantity, 0.001);
+  });
+  it('seed "min" bumps above minQty when minNotional requires it', async () => {
+    // minNotional 50 at a $5 price ⇒ need 10 units; minQty 0.001 is far too small.
+    const cheap = { symbols: [{ symbol: 'CHEAPUSDC', status: 'TRADING', pricePrecision: 2, quantityPrecision: 1,
+      filters: [{ filterType: 'PRICE_FILTER', tickSize: '0.01' }, { filterType: 'LOT_SIZE', stepSize: '0.1', minQty: '0.1' }, { filterType: 'MIN_NOTIONAL', notional: '50' }] }] };
+    const _deps = deps({ exchangeInfo: cheap, bookTicker: { symbol: 'CHEAPUSDC', bidPrice: '5', askPrice: '5.01' } });
+    const r = await placeLadder({ market: 'futures', symbol: 'CHEAPUSDC', side: 'SELL', lo: 6, hi: 8, count: 4, totalNotional: 400, positionSide: 'SHORT', seedQuantity: 'min', _deps });
+    assert.equal(r.ladder_preview.seed.quantity, 10); // 50 / 5 = 10, snapped up to 0.1 step
+  });
 });
 
 describe('getFundingRate', () => {
@@ -779,6 +794,96 @@ describe('getFundingRate', () => {
     const r = await getFundingRate({ market: 'futures', symbol: 'BTCUSDC', history: true, _deps });
     assert.equal(r.count, 1);
     assert.equal(r.fundingHistory[0].fundingRatePct, '0.0100%');
+  });
+});
+
+describe('market-data scan variants', () => {
+  it('get24hrTicker all:true returns every symbol; quote narrows to a quote asset', async () => {
+    const _deps = deps({ 'ticker/24hr': [
+      { symbol: 'BTCUSDC', lastPrice: '60000', priceChangePercent: '1.2' },
+      { symbol: 'ETHUSDC', lastPrice: '3000', priceChangePercent: '-0.5' },
+      { symbol: 'BTCUSDT', lastPrice: '60010', priceChangePercent: '1.1' },
+    ] });
+    const r = await get24hrTicker({ market: 'futures', all: true, quote: 'USDC', _deps });
+    assert.equal(r.all, true);
+    assert.equal(r.count, 2);
+    assert.ok(r.tickers.every((t) => t.symbol.endsWith('USDC')));
+  });
+  it('getBookTicker all:true maps the spread per row', async () => {
+    const _deps = deps({ 'ticker/bookTicker': [{ symbol: 'BTCUSDC', bidPrice: '60000', askPrice: '60010', bidQty: '1', askQty: '2' }] });
+    const r = await getBookTicker({ market: 'futures', all: true, _deps });
+    assert.equal(r.count, 1);
+    assert.equal(r.tickers[0].spread, '10');
+  });
+  it('getRollingWindowTicker scans a symbols list (spot) and sends a symbols param', async () => {
+    const _deps = deps({ '/api/v3/ticker?': [
+      { symbol: 'BTCUSDC', lastPrice: '60000' }, { symbol: 'ETHUSDC', lastPrice: '3000' },
+    ] });
+    const r = await getRollingWindowTicker({ market: 'spot', symbols: ['BTCUSDC', 'ETHUSDC'], windowSize: '4h', _deps });
+    assert.equal(r.count, 2);
+    assert.equal(r.windowSize, '4h');
+    assert.match(_deps.fetch.calls[0].url, /symbols=/);
+  });
+});
+
+describe('getUiKlines', () => {
+  it('maps spot uiKlines candles and hits /api/v3/uiKlines', async () => {
+    const _deps = deps({ uiKlines: [[1, '1', '2', '0.5', '1.5', '100', 2]] });
+    const r = await getUiKlines({ market: 'spot', symbol: 'BTCUSDC', interval: '1h', _deps });
+    assert.equal(r.count, 1);
+    assert.equal(r.candles[0].high, '2');
+    assert.match(_deps.fetch.calls[0].url, /\/api\/v3\/uiKlines/);
+  });
+  it('rejects futures', async () => {
+    await assert.rejects(getUiKlines({ market: 'futures', symbol: 'BTCUSDC', _deps: deps() }), /spot-only/);
+  });
+});
+
+describe('getTradingDayTicker', () => {
+  it('single symbol returns one row', async () => {
+    const _deps = deps({ 'ticker/tradingDay': { symbol: 'BTCUSDC', lastPrice: '60000', priceChangePercent: '1.0' } });
+    const r = await getTradingDayTicker({ market: 'spot', symbol: 'BTCUSDC', _deps });
+    assert.equal(r.symbol, 'BTCUSDC');
+    assert.equal(r.lastPrice, '60000');
+  });
+  it('symbols list returns an array and sends a symbols param', async () => {
+    const _deps = deps({ 'ticker/tradingDay': [{ symbol: 'BTCUSDC', lastPrice: '60000' }, { symbol: 'ETHUSDC', lastPrice: '3000' }] });
+    const r = await getTradingDayTicker({ market: 'spot', symbols: 'BTCUSDC,ETHUSDC', _deps });
+    assert.equal(r.count, 2);
+    assert.match(_deps.fetch.calls[0].url, /symbols=/);
+  });
+  it('rejects futures', async () => {
+    await assert.rejects(getTradingDayTicker({ market: 'futures', symbol: 'BTCUSDC', _deps: deps() }), /spot-only/);
+  });
+});
+
+describe('user-data stream (listenKey)', () => {
+  it('startUserStream POSTs the futures listenKey endpoint and returns a wsUrl', async () => {
+    const _deps = deps({ listenKey: { listenKey: 'abc123' } });
+    const r = await startUserStream({ market: 'futures', account: '1', _deps });
+    assert.equal(r.listenKey, 'abc123');
+    assert.match(r.wsUrl, /^wss:\/\/fstream\.binance\.com\/ws\/abc123$/);
+    assert.equal(_deps.fetch.calls[0].method, 'POST');
+    assert.match(_deps.fetch.calls[0].url, /\/fapi\/v1\/listenKey/);
+  });
+  it('keepAliveUserStream PUTs; spot requires a listenKey', async () => {
+    const _deps = deps({ userDataStream: {} });
+    await keepAliveUserStream({ market: 'spot', account: '1', listenKey: 'k', _deps });
+    assert.equal(_deps.fetch.calls[0].method, 'PUT');
+    assert.match(_deps.fetch.calls[0].url, /\/api\/v3\/userDataStream\?listenKey=k/);
+    await assert.rejects(keepAliveUserStream({ market: 'spot', account: '1', _deps: deps() }), /listenKey is required/);
+  });
+  it('closeUserStream DELETEs the futures endpoint', async () => {
+    const _deps = deps({ listenKey: {} });
+    await closeUserStream({ market: 'futures', account: '1', _deps });
+    assert.equal(_deps.fetch.calls[0].method, 'DELETE');
+    assert.match(_deps.fetch.calls[0].url, /\/fapi\/v1\/listenKey/);
+  });
+  it('routes the requested account for the listenKey', async () => {
+    const seen = [];
+    const _deps = { fetch: mockFetch({ listenKey: { listenKey: 'k2' } }), getKeys: (a) => { seen.push(a); return { key: 'k', secret: 's' }; }, now: () => 1700000000000 };
+    await startUserStream({ market: 'futures', account: '2', _deps });
+    assert.deepEqual(seen, ['2']);
   });
 });
 

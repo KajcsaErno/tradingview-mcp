@@ -69,7 +69,7 @@ Gives your AI assistant eyes and hands on your own chart:
 - **Monitor your chart** — stream JSONL from your locally running chart for local monitoring scripts
 - **CLI access** — every MCP tool is also a `tv` CLI command, pipe-friendly with JSON output
 - **Launch TradingView** — auto-detect and launch with debug mode from any platform
-- **Binance trading (optional, separate)** — a standalone `tv binance` client (40 tools) places real Binance spot / USD-M / COIN-M orders via your own API keys; dry-run + post-only by default. Includes laddered scale-in, risk-based position sizing, a portfolio risk report, multi-account mirroring, and account monitoring. Independent of the TradingView bridge — see [Binance trading](#binance-trading-direct-api)
+- **Binance trading (optional, separate)** — a standalone `tv binance` client (45 tools) places real Binance spot / USD-M / COIN-M orders via your own API keys; dry-run + post-only by default. Includes laddered scale-in, risk-based position sizing, a portfolio risk report, multi-account mirroring, a one-call market screener (`--all`), real-time order/position WebSocket push, and account monitoring. Independent of the TradingView bridge — see [Binance trading](#binance-trading-direct-api)
 
 ## Install with Claude Code
 
@@ -316,15 +316,15 @@ Keys are read from `.env` or the environment — never hardcoded, never committe
 
 `market` is `futures` (USD-M) by default; pass `-m spot` for spot or `-m coinm` for COIN-M. `leverage`, `margin-type`, `position-mode`, `account-summary`, `risk-report`, `bracket`, and `ladder` are futures-only.
 
-**Tool groups (40 tools / 42 CLI subcommands):**
+**Tool groups (45 tools / 45 CLI subcommands):**
 
 | Group | Tools |
 |-------|-------|
 | **Reads** | `balance`, `account-summary`, `account-snapshot`, `risk-report`, `positions`, `orders`, `order-status`, `order-history`, `income`, `account-trades`, `position-mode`, `leverage-brackets`, `commission`, `server-time` |
-| **Market data (public)** | `ticker`, `klines`, `ticker-24hr`, `book-ticker`, `funding`, `avg-price`, `rolling-ticker`, `depth`, `symbol-info`, `trades`, `agg-trades`, `historical` |
+| **Market data (public)** | `ticker`, `klines`, `ui-klines`, `ticker-24hr` (`--all [--quote USDC]`), `book-ticker` (`--all [--quote USDC]`), `trading-day`, `funding`, `avg-price`, `rolling-ticker` (`--symbols`), `depth`, `symbol-info`, `trades`, `agg-trades`, `historical` |
 | **Orders & risk (money-moving, dry-run unless `--confirm`)** | `order`, `ladder`, `bracket`, `modify`, `ensure-stop`, `cancel`, `cancel-all`, `cancel-algo`, `mirror-order`, `mirror-bracket`, `transfer` |
 | **Sizing & config** | `position-size` (pure calc), `leverage`, `margin-type`, `set-position-mode` |
-| **Monitoring** | `stream` (JSONL on change), `account-snapshot` |
+| **Monitoring** | `stream` (polled JSONL on change), `user-stream` (real-time WebSocket push of fills/positions/balance), `account-snapshot` |
 
 **COIN-M futures (`-m coinm`)** has the same commands as USD-M — reads, order placement, brackets, cancels, leverage, and margin-type — routed to the coin-margined (`dapi`) API. **One critical difference: COIN-M `--quantity` is in CONTRACTS** (a fixed USD notional each, e.g. $100/contract for BTC), not coin amount. Order previews include a `coinm_note` reminder, and `symbol-info` reports `contractSize`.
 
@@ -347,7 +347,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (119 MCP tools)
+## Tool Reference (124 MCP tools)
 
 The tables below cover the **79 TradingView chart tools**. The **40 Binance tools** are documented separately under [Binance trading](#binance-trading-direct-api).
 

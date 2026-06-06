@@ -403,12 +403,13 @@ function stepDecimals(step) {
   return dec.length;
 }
 /** Snap a value to a Binance step/tick. mode 'floor' for quantity (never over-buy),
- *  'round' (nearest) for price. Returns the original value if step is missing/invalid. */
+ *  'ceil' to guarantee a minimum (never under-fill), 'round' (nearest) for price.
+ *  Returns the original value if step is missing/invalid. */
 function snap(value, step, mode = 'round') {
   const v = Number(value);
   const s = Number(step);
   if (!s || !Number.isFinite(s)) return v;
-  const n = mode === 'floor' ? Math.floor(v / s) : Math.round(v / s);
+  const n = mode === 'floor' ? Math.floor(v / s) : mode === 'ceil' ? Math.ceil(v / s) : Math.round(v / s);
   return Number((n * s).toFixed(stepDecimals(step)));
 }
 
@@ -742,43 +743,106 @@ export async function getKlines({ market = 'futures', symbol, interval = '1h', s
   params.limit = String(Math.max(1, Math.min(Number(limit) || 500, cap)));
   const endpoint = isFuturesLike(market) ? `${futPrefix(market)}/v1/klines` : '/api/v3/klines';
   const data = await publicRequest({ market, endpoint, params, _deps });
-  const candles = (data || []).map((k) => ({
-    openTime: k[0], open: k[1], high: k[2], low: k[3], close: k[4], volume: k[5], closeTime: k[6],
-  }));
+  const candles = (data || []).map(mapKline);
   return { success: true, market, symbol: sym, interval: iv, count: candles.length, candles };
 }
 
-/** 24-hour rolling price-change stats for a symbol (public). */
-export async function get24hrTicker({ market = 'futures', symbol, _deps = {} } = {}) {
+// Klines come back as positional arrays — name the fields we expose.
+const mapKline = (k) => ({ openTime: k[0], open: k[1], high: k[2], low: k[3], close: k[4], volume: k[5], closeTime: k[6] });
+
+/** UI-optimized candlesticks (spot-only `/api/v3/uiKlines`) — same shape as getKlines but the
+ *  bars are tuned by Binance for chart presentation (consistent spacing at boundaries). */
+export async function getUiKlines({ market = 'spot', symbol, interval = '1h', startTime, endTime, limit = 500, _deps = {} } = {}) {
+  if (isFuturesLike(market)) throw new Error('uiKlines is spot-only (use getKlines for futures)');
   if (!symbol) throw new Error('symbol is required');
   const sym = String(symbol).toUpperCase();
-  const endpoint = isFuturesLike(market) ? `${futPrefix(market)}/v1/ticker/24hr` : '/api/v3/ticker/24hr';
-  const data = await publicRequest({ market, endpoint, params: { symbol: sym }, _deps });
-  // COIN-M returns an array (one row per contract); pick the matching symbol.
-  const t = Array.isArray(data) ? (data.find((x) => x.symbol === sym) || data[0] || {}) : data;
-  return {
-    success: true, market, symbol: t.symbol || sym,
-    lastPrice: t.lastPrice, priceChange: t.priceChange, priceChangePercent: t.priceChangePercent,
-    weightedAvgPrice: t.weightedAvgPrice, highPrice: t.highPrice, lowPrice: t.lowPrice,
-    openPrice: t.openPrice, volume: t.volume, quoteVolume: t.quoteVolume,
-  };
+  const iv = String(interval);
+  if (!KLINE_INTERVALS.includes(iv)) throw new Error(`interval must be one of: ${KLINE_INTERVALS.join(', ')}`);
+  const params = { symbol: sym, interval: iv };
+  if (startTime !== undefined) params.startTime = String(requireFinite(startTime, 'startTime'));
+  if (endTime !== undefined) params.endTime = String(requireFinite(endTime, 'endTime'));
+  params.limit = String(Math.max(1, Math.min(Number(limit) || 500, 1000)));
+  const data = await publicRequest({ market, endpoint: '/api/v3/uiKlines', params, _deps });
+  const candles = (data || []).map(mapKline);
+  return { success: true, market, symbol: sym, interval: iv, count: candles.length, candles };
 }
 
-/** Best bid/ask (top of book) for a symbol (public) — includes the computed spread. */
-export async function getBookTicker({ market = 'futures', symbol, _deps = {} } = {}) {
-  if (!symbol) throw new Error('symbol is required');
-  const sym = String(symbol).toUpperCase();
-  const endpoint = isFuturesLike(market) ? `${futPrefix(market)}/v1/ticker/bookTicker` : '/api/v3/ticker/bookTicker';
-  const data = await publicRequest({ market, endpoint, params: { symbol: sym }, _deps });
-  const t = Array.isArray(data) ? (data.find((x) => x.symbol === sym) || data[0] || {}) : data;
+// Shape a raw 24hr/tradingDay ticker row into our compact field set.
+const map24hr = (t) => ({
+  symbol: t.symbol,
+  lastPrice: t.lastPrice, priceChange: t.priceChange, priceChangePercent: t.priceChangePercent,
+  weightedAvgPrice: t.weightedAvgPrice, highPrice: t.highPrice, lowPrice: t.lowPrice,
+  openPrice: t.openPrice, volume: t.volume, quoteVolume: t.quoteVolume,
+});
+// Shape a raw bookTicker row, computing the spread.
+const mapBook = (t) => {
   const bid = Number(t.bidPrice), ask = Number(t.askPrice);
   const spread = Number.isFinite(bid) && Number.isFinite(ask) ? ask - bid : undefined;
   return {
-    success: true, market, symbol: t.symbol || sym,
-    bidPrice: t.bidPrice, bidQty: t.bidQty, askPrice: t.askPrice, askQty: t.askQty,
+    symbol: t.symbol, bidPrice: t.bidPrice, bidQty: t.bidQty, askPrice: t.askPrice, askQty: t.askQty,
     spread: spread !== undefined ? String(spread) : undefined,
     spreadPct: spread !== undefined && bid ? `${(spread / bid * 100).toFixed(4)}%` : undefined,
   };
+};
+// Keep only symbols ending in the given quote asset (e.g. "USDC") — for one-call screening.
+const filterByQuote = (rows, quote) => {
+  if (!quote) return rows;
+  const q = String(quote).toUpperCase();
+  return rows.filter((r) => (r.symbol || '').toUpperCase().endsWith(q));
+};
+
+/** 24-hour rolling price-change stats (public). Single symbol by default; pass `all:true` to
+ *  return every symbol on the market (optionally narrowed to a `quote` asset, e.g. "USDC"). */
+export async function get24hrTicker({ market = 'futures', symbol, all = false, quote, _deps = {} } = {}) {
+  const endpoint = isFuturesLike(market) ? `${futPrefix(market)}/v1/ticker/24hr` : '/api/v3/ticker/24hr';
+  if (all) {
+    const data = await publicRequest({ market, endpoint, _deps }); // no symbol ⇒ array of all
+    const tickers = filterByQuote((Array.isArray(data) ? data : []).map(map24hr), quote);
+    return { success: true, market, all: true, quote: quote ? String(quote).toUpperCase() : undefined, count: tickers.length, tickers };
+  }
+  if (!symbol) throw new Error('symbol is required (or pass all:true)');
+  const sym = String(symbol).toUpperCase();
+  const data = await publicRequest({ market, endpoint, params: { symbol: sym }, _deps });
+  // COIN-M returns an array (one row per contract); pick the matching symbol.
+  const t = Array.isArray(data) ? (data.find((x) => x.symbol === sym) || data[0] || {}) : data;
+  return { success: true, market, ...map24hr({ ...t, symbol: t.symbol || sym }) };
+}
+
+/** Best bid/ask (top of book) with computed spread (public). Single symbol by default; pass
+ *  `all:true` for every symbol on the market (optionally narrowed to a `quote` asset). */
+export async function getBookTicker({ market = 'futures', symbol, all = false, quote, _deps = {} } = {}) {
+  const endpoint = isFuturesLike(market) ? `${futPrefix(market)}/v1/ticker/bookTicker` : '/api/v3/ticker/bookTicker';
+  if (all) {
+    const data = await publicRequest({ market, endpoint, _deps }); // no symbol ⇒ array of all
+    const tickers = filterByQuote((Array.isArray(data) ? data : []).map(mapBook), quote);
+    return { success: true, market, all: true, quote: quote ? String(quote).toUpperCase() : undefined, count: tickers.length, tickers };
+  }
+  if (!symbol) throw new Error('symbol is required (or pass all:true)');
+  const sym = String(symbol).toUpperCase();
+  const data = await publicRequest({ market, endpoint, params: { symbol: sym }, _deps });
+  const t = Array.isArray(data) ? (data.find((x) => x.symbol === sym) || data[0] || {}) : data;
+  return { success: true, market, ...mapBook({ ...t, symbol: t.symbol || sym }) };
+}
+
+/** Trading-day price-change stats (spot-only `/api/v3/ticker/tradingDay`) — like 24hr but
+ *  anchored to the exchange trading day in `timeZone` (default 0/UTC). One `symbol`, or a
+ *  `symbols` list (array or CSV) to scan several at once. */
+export async function getTradingDayTicker({ market = 'spot', symbol, symbols, timeZone, _deps = {} } = {}) {
+  if (isFuturesLike(market)) throw new Error('tradingDay ticker is spot-only');
+  const list = Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : null);
+  const params = {};
+  if (timeZone !== undefined) params.timeZone = String(timeZone);
+  if (list && list.length) {
+    params.symbols = JSON.stringify(list.map((s) => String(s).trim().toUpperCase()));
+    const data = await publicRequest({ market, endpoint: '/api/v3/ticker/tradingDay', params, _deps });
+    const tickers = (Array.isArray(data) ? data : [data]).map(map24hr);
+    return { success: true, market, count: tickers.length, tickers };
+  }
+  if (!symbol) throw new Error('symbol or symbols is required');
+  params.symbol = String(symbol).toUpperCase();
+  const data = await publicRequest({ market, endpoint: '/api/v3/ticker/tradingDay', params, _deps });
+  const t = Array.isArray(data) ? (data[0] || {}) : data;
+  return { success: true, market, ...map24hr({ ...t, symbol: t.symbol || params.symbol }) };
 }
 
 /** Current average price over a short window (spot-only; Binance returns ~5-min avg). */
@@ -790,19 +854,24 @@ export async function getAvgPrice({ market = 'spot', symbol, _deps = {} } = {}) 
   return { success: true, market, symbol: sym, mins: data.mins, price: data.price };
 }
 
-/** Rolling-window price-change stats with a custom window (spot-only; windowSize e.g. "1d", "4h"). */
-export async function getRollingWindowTicker({ market = 'spot', symbol, windowSize = '1d', _deps = {} } = {}) {
+/** Rolling-window price-change stats with a custom window (spot-only; windowSize e.g. "1d", "4h").
+ *  Binance's `/api/v3/ticker` has no bare "all" — scan several at once with a `symbols` list
+ *  (array or CSV) instead. */
+export async function getRollingWindowTicker({ market = 'spot', symbol, symbols, windowSize = '1d', _deps = {} } = {}) {
   if (isFuturesLike(market)) throw new Error('rolling-window ticker is spot-only (use get24hrTicker for futures)');
-  if (!symbol) throw new Error('symbol is required');
+  const win = String(windowSize);
+  const list = Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : null);
+  if (list && list.length) {
+    const params = { symbols: JSON.stringify(list.map((s) => String(s).trim().toUpperCase())), windowSize: win };
+    const data = await publicRequest({ market, endpoint: '/api/v3/ticker', params, _deps });
+    const tickers = (Array.isArray(data) ? data : [data]).map((t) => ({ ...map24hr(t), windowSize: win }));
+    return { success: true, market, windowSize: win, count: tickers.length, tickers };
+  }
+  if (!symbol) throw new Error('symbol or symbols is required');
   const sym = String(symbol).toUpperCase();
-  const data = await publicRequest({ market, endpoint: '/api/v3/ticker', params: { symbol: sym, windowSize: String(windowSize) }, _deps });
+  const data = await publicRequest({ market, endpoint: '/api/v3/ticker', params: { symbol: sym, windowSize: win }, _deps });
   const t = Array.isArray(data) ? (data[0] || {}) : data;
-  return {
-    success: true, market, symbol: t.symbol || sym, windowSize: String(windowSize),
-    lastPrice: t.lastPrice, priceChange: t.priceChange, priceChangePercent: t.priceChangePercent,
-    weightedAvgPrice: t.weightedAvgPrice, highPrice: t.highPrice, lowPrice: t.lowPrice,
-    openPrice: t.openPrice, volume: t.volume, quoteVolume: t.quoteVolume,
-  };
+  return { success: true, market, windowSize: win, ...map24hr({ ...t, symbol: t.symbol || sym }) };
 }
 
 /** Funding rate for a perpetual (public). Default returns the current premium-index snapshot
@@ -828,6 +897,50 @@ export async function getFundingRate({ market = 'futures', symbol, history = fal
     lastFundingRatePct: t.lastFundingRate != null ? `${(Number(t.lastFundingRate) * 100).toFixed(4)}%` : undefined,
     nextFundingTime: t.nextFundingTime, interestRate: t.interestRate,
   };
+}
+
+// ── User-data stream (listenKey) ─────────────────────────────────────────────
+// Powers real-time PUSH of order fills, position and balance changes over a WebSocket —
+// the low-latency alternative to polling getAccountSnapshot. The REST calls here manage the
+// listenKey lifecycle; the actual WS loop lives in the `tv binance user-stream` CLI subcommand
+// (a long-running loop, like `tv binance stream`). Uses the API key header only (NOT signed).
+const WS_BASES = {
+  spot: 'wss://stream.binance.com:9443',
+  futures: 'wss://fstream.binance.com',
+  coinm: 'wss://dstream.binance.com',
+  'spot-testnet': 'wss://stream.testnet.binance.vision',
+  'futures-testnet': 'wss://stream.binancefuture.com',
+  'coinm-testnet': 'wss://dstream.binancefuture.com',
+};
+const listenKeyEndpoint = (market) => (isFuturesLike(market) ? `${futPrefix(market)}/v1/listenKey` : '/api/v3/userDataStream');
+
+/** Open a user-data stream: returns a `listenKey` and the `wsUrl` to connect to. The key
+ *  expires ~60 min after creation unless refreshed via keepAliveUserStream. Per-account. */
+export async function startUserStream({ market = 'futures', account = '1', _deps = {} } = {}) {
+  const deps = resolveDeps(account, _deps);
+  const data = await publicRequest({ market, method: 'POST', endpoint: listenKeyEndpoint(market), includeApiKey: true, _deps: deps });
+  if (!data || !data.listenKey) throw new Error('Binance returned no listenKey');
+  return { success: true, market, account, listenKey: data.listenKey, wsUrl: `${WS_BASES[market]}/ws/${data.listenKey}` };
+}
+
+/** Refresh a user-data stream's 60-min expiry (call ~every 30 min). Futures key off the account;
+ *  spot requires the listenKey as a parameter. */
+export async function keepAliveUserStream({ market = 'futures', account = '1', listenKey, _deps = {} } = {}) {
+  const deps = resolveDeps(account, _deps);
+  const futuresLike = isFuturesLike(market);
+  if (!futuresLike && !listenKey) throw new Error('listenKey is required to keep a spot stream alive');
+  const params = futuresLike ? {} : { listenKey: String(listenKey) };
+  await publicRequest({ market, method: 'PUT', endpoint: listenKeyEndpoint(market), params, includeApiKey: true, _deps: deps });
+  return { success: true, market, account };
+}
+
+/** Close a user-data stream (best-effort cleanup on shutdown). */
+export async function closeUserStream({ market = 'futures', account = '1', listenKey, _deps = {} } = {}) {
+  const deps = resolveDeps(account, _deps);
+  const futuresLike = isFuturesLike(market);
+  const params = futuresLike ? {} : { listenKey: String(listenKey || '') };
+  await publicRequest({ market, method: 'DELETE', endpoint: listenKeyEndpoint(market), params, includeApiKey: true, _deps: deps });
+  return { success: true, market, account };
 }
 
 /** Symbol trading filters (tick size, step size, min notional) — use these to
@@ -1173,6 +1286,25 @@ export async function placeLadder({
   const perNotional = totalNotional != null ? Number(totalNotional) / n : null;
   const perQty = totalQuantity != null ? Number(totalQuantity) / n : null;
 
+  // Resolve a "min" seed to the smallest valid position for this symbol (LOT_SIZE minQty
+  // AND MIN_NOTIONAL), so set-and-forget ladders can rest a closePosition stop without
+  // over-seeding. We snap the notional-implied qty UP (never under-fill the min-notional).
+  let seedQty = seedQuantity;
+  if (typeof seedQuantity === 'string' && seedQuantity.trim().toLowerCase() === 'min') {
+    const si = info || await getSymbolInfo({ market, symbol: sym, _deps: deps });
+    const mq = Number(si.minQty) || 0;
+    const mn = Number(si.minNotional) || 0;
+    const stp = Number(si.stepSize) || mq || 0;
+    let refPx = lowP; // conservative fallback: notional is qty×fillPrice, lower price ⇒ more qty needed
+    try {
+      const bt = await getBookTicker({ market, symbol: sym, _deps: deps });
+      refPx = Number(bt.bidPrice) || Number(bt.askPrice) || lowP; // SELL seed fills near bid
+    } catch { /* ticker unavailable — fall back to lowP */ }
+    const byNotional = mn > 0 && refPx > 0 ? snap(mn / refPx, stp, 'ceil') : 0;
+    seedQty = Math.max(mq, byNotional);
+    if (!(seedQty > 0)) throw new Error('could not resolve a "min" seed — symbol filters unavailable; pass an explicit seedQuantity');
+  }
+
   const rungs = [];
   let skipped = 0;
   for (let i = 0; i < n; i++) {
@@ -1203,7 +1335,7 @@ export async function placeLadder({
     totalQuantity: Number(totQty.toFixed(8)), totalNotional: Number(totNotional.toFixed(2)),
     avgPrice: Number(avgPrice.toFixed(2)), impliedAccountLeverage, skippedBelowMin: skipped,
     timeInForce: postOnly ? 'GTX (post-only)' : 'GTC',
-    seed: seedQuantity ? { type: 'MARKET', quantity: seedQuantity } : undefined,
+    seed: seedQty ? { type: 'MARKET', quantity: seedQty } : undefined,
     stop: stop != null ? { type: 'STOP_MARKET', closePosition: true, triggerPrice: stop } : undefined,
     ...(warnings.length ? { warnings } : {}),
   };
@@ -1211,7 +1343,7 @@ export async function placeLadder({
   if (!confirm) {
     return {
       success: false, dry_run: true,
-      message: `DRY RUN — no orders sent. Pass confirm:true to place ${rungs.length} ladder rungs${seedQuantity ? ' + seed' : ''}${stop != null ? ' + stop' : ''} (LIVE real funds).`,
+      message: `DRY RUN — no orders sent. Pass confirm:true to place ${rungs.length} ladder rungs${seedQty ? ` + seed (${seedQty})` : ''}${stop != null ? ' + stop' : ''} (LIVE real funds).`,
       ladder_preview: plan,
       sample_rungs: [...rungs.slice(0, 3), ...(rungs.length > 3 ? [rungs[rungs.length - 1]] : [])],
     };
@@ -1219,8 +1351,8 @@ export async function placeLadder({
 
   // 1) optional seed market order — opens the position so a stop has something to guard.
   let seedResult;
-  if (seedQuantity) {
-    seedResult = await placeOrder({ market, symbol: sym, side: sd, type: 'MARKET', quantity: seedQuantity, positionSide: ps || undefined, allowTaker: true, round, account, confirm: true, _deps: deps });
+  if (seedQty) {
+    seedResult = await placeOrder({ market, symbol: sym, side: sd, type: 'MARKET', quantity: seedQty, positionSide: ps || undefined, allowTaker: true, round, account, confirm: true, _deps: deps });
   }
   // 2) optional protective closePosition stop.
   let stopResult;
