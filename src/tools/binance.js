@@ -71,13 +71,32 @@ export function registerBinanceTools(server) {
     limit: z.coerce.number().optional().describe('Bars to return (spot max 1000, futures max 1500; default 500)'),
   }, wrap(core.getKlines));
 
-  server.tool('binance_get_24hr_ticker', '24-hour rolling price-change statistics for a symbol (public)', {
-    market, symbol,
+  server.tool('binance_get_24hr_ticker', '24-hour price-change stats (public). One symbol, or all:true for every symbol on the market (optionally narrowed to a quote asset, e.g. "USDC") — a one-call screener.', {
+    market, symbol: symbol.optional(),
+    all: z.boolean().default(false).describe('Return every symbol on the market instead of one'),
+    quote: z.string().optional().describe('With all:true, keep only symbols in this quote asset, e.g. "USDC"'),
   }, wrap(core.get24hrTicker));
 
-  server.tool('binance_get_book_ticker', 'Best bid/ask (top of book) for a symbol, with computed spread (public)', {
-    market, symbol,
+  server.tool('binance_get_book_ticker', 'Best bid/ask + spread (public). One symbol, or all:true for every symbol on the market (optionally narrowed to a quote asset).', {
+    market, symbol: symbol.optional(),
+    all: z.boolean().default(false).describe('Return every symbol on the market instead of one'),
+    quote: z.string().optional().describe('With all:true, keep only symbols in this quote asset, e.g. "USDC"'),
   }, wrap(core.getBookTicker));
+
+  server.tool('binance_get_ui_klines', 'UI-optimized candlesticks (spot-only /uiKlines) — same shape as klines but tuned by Binance for chart presentation', {
+    market: market.default('spot'), symbol,
+    interval: z.enum(['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']).default('1h'),
+    startTime: z.coerce.number().optional().describe('Start time (ms epoch)'),
+    endTime: z.coerce.number().optional().describe('End time (ms epoch)'),
+    limit: z.coerce.number().optional().describe('Bars to return (max 1000; default 500)'),
+  }, wrap(core.getUiKlines));
+
+  server.tool('binance_get_trading_day_ticker', 'Trading-day price-change stats (spot-only) anchored to the exchange trading day in timeZone. One symbol, or a symbols list to scan several.', {
+    market: market.default('spot'),
+    symbol: symbol.optional(),
+    symbols: z.array(z.string()).optional().describe('List of symbols to scan at once'),
+    timeZone: z.string().optional().describe('Trading-day offset, e.g. "0" (UTC, default) or "8"'),
+  }, wrap(core.getTradingDayTicker));
 
   server.tool('binance_get_avg_price', 'Current average price over a short window (spot-only; ~5-min avg)', {
     market, symbol,
@@ -89,9 +108,24 @@ export function registerBinanceTools(server) {
     limit: z.coerce.number().optional().describe('History rows (default 10, max 1000)'),
   }, wrap(core.getFundingRate));
 
-  server.tool('binance_get_rolling_window_ticker', 'Rolling-window price-change stats with a custom window (spot-only; windowSize e.g. "1d", "4h")', {
-    market, symbol, windowSize: z.string().default('1d').describe('Window, e.g. "1m"-"59m", "1h"-"23h", "1d"-"7d"'),
+  server.tool('binance_get_rolling_window_ticker', 'Rolling-window price-change stats (spot-only). One symbol, or a symbols list to scan a set (Binance has no bare "all" for this endpoint).', {
+    market, symbol: symbol.optional(),
+    symbols: z.array(z.string()).optional().describe('List of symbols to scan at once'),
+    windowSize: z.string().default('1d').describe('Window, e.g. "1m"-"59m", "1h"-"23h", "1d"-"7d"'),
   }, wrap(core.getRollingWindowTicker));
+
+  // ---- User-data stream (real-time push of fills/positions/balance) ----
+  server.tool('binance_start_user_stream', 'Open a user-data stream: returns a listenKey + wsUrl for real-time PUSH of order fills, position and balance changes. Connect a WebSocket to wsUrl; refresh with keepalive every ~30 min. (For a ready-made live feed, run the `tv binance user-stream` CLI.)', {
+    market, account,
+  }, wrap(core.startUserStream));
+
+  server.tool('binance_keepalive_user_stream', 'Refresh a user-data stream\'s 60-min expiry (call ~every 30 min). Spot requires the listenKey; futures key off the account.', {
+    market, account, listenKey: z.string().optional().describe('Required for spot; ignored for futures'),
+  }, wrap(core.keepAliveUserStream));
+
+  server.tool('binance_close_user_stream', 'Close a user-data stream (cleanup).', {
+    market, account, listenKey: z.string().optional(),
+  }, wrap(core.closeUserStream));
 
   server.tool('binance_get_order_book', 'Order book depth (public)', {
     market, symbol, limit: z.coerce.number().optional().describe('Levels per side (default 20, max 1000)'),
@@ -219,7 +253,7 @@ export function registerBinanceTools(server) {
     totalNotional: z.coerce.number().optional().describe('Total $ notional split evenly across rungs'),
     totalQuantity: z.coerce.number().optional().describe('Total base qty split evenly across rungs'),
     positionSide: z.enum(['LONG', 'SHORT', 'BOTH']).optional().describe('Required in Hedge Mode'),
-    seedQuantity: z.coerce.number().optional().describe('Optional MARKET seed to open the position immediately'),
+    seedQuantity: z.union([z.literal('min'), z.coerce.number()]).optional().describe('Optional MARKET seed to open the position immediately; "min" uses the smallest valid size so a closePosition stop can rest'),
     stop: z.coerce.number().optional().describe('Optional closePosition STOP_MARKET trigger price'),
     postOnly: z.boolean().default(true).describe('Rungs are maker-only GTX by default'),
     round: z.boolean().default(true),

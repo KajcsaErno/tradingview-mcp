@@ -80,6 +80,84 @@ register('binance', {
         }
       },
     }],
+    ['user-stream', {
+      description: 'Stream real-time order fills, position & balance updates over a WebSocket (user-data stream). Ctrl-C to stop.',
+      options: {
+        market: marketOpt,
+        account: accountOpt,
+        raw: { type: 'boolean', description: 'Emit the raw Binance event payload instead of the compact summary' },
+      },
+      handler: async (o) => {
+        const market = o.market || 'futures';
+        const account = o.account || '1';
+        process.stderr.write('⚠  tradingview-mcp | Unofficial. Connects to YOUR Binance account via your own API keys.\n');
+        process.stderr.write(`[user-stream:${market}/acct${account}] starting… Ctrl-C to stop\n`);
+
+        let running = true, ws = null, keepAlive = null, listenKey = null, backoff = 1000;
+        const emit = (obj) => process.stdout.write(JSON.stringify({ time: new Date().toISOString(), _stream: 'user', market, account, ...obj }) + '\n');
+
+        // Normalize the key futures user-data events into a compact line (or pass raw with --raw).
+        const fmt = (m) => {
+          if (o.raw) return { event: m.e, raw: m };
+          switch (m.e) {
+            case 'ORDER_TRADE_UPDATE': { const x = m.o || {};
+              return { event: 'order', symbol: x.s, side: x.S, type: x.o, status: x.X, posSide: x.ps,
+                qty: x.q, price: x.p, avgPrice: x.ap, lastFilledQty: x.l, cumFilledQty: x.z,
+                stop: x.sp, realizedPnl: x.rp, reduceOnly: x.R, orderId: x.i }; }
+            case 'ACCOUNT_UPDATE': { const a = m.a || {};
+              return { event: 'account', reason: a.m,
+                balances: (a.B || []).map((b) => ({ asset: b.a, wallet: b.wb, cross: b.cw })),
+                positions: (a.P || []).map((p) => ({ symbol: p.s, posSide: p.ps, amt: p.pa, entry: p.ep, uPnl: p.up })) }; }
+            case 'ACCOUNT_CONFIG_UPDATE': return { event: 'config', raw: m.ac || m.ai };
+            case 'listenKeyExpired': return { event: 'listenKeyExpired' };
+            default: return { event: m.e || 'unknown', raw: m };
+          }
+        };
+
+        const cleanup = async () => {
+          running = false;
+          if (keepAlive) clearInterval(keepAlive);
+          try { ws && ws.close(); } catch { /* ignore */ }
+          if (listenKey) { try { await core.closeUserStream({ market, account, listenKey }); } catch { /* ignore */ } }
+          process.stderr.write('\n[user-stream] stopped\n');
+          process.exit(0);
+        };
+        process.on('SIGINT', cleanup);
+        process.on('SIGTERM', cleanup);
+
+        const connect = async () => {
+          if (!running) return;
+          let started;
+          try { started = await core.startUserStream({ market, account }); }
+          catch (e) {
+            process.stderr.write(`[user-stream] start failed: ${e.message} — retry in ${backoff}ms\n`);
+            return void setTimeout(connect, (backoff = Math.min(backoff * 2, 30000)));
+          }
+          listenKey = started.listenKey;
+          backoff = 1000;
+          ws = new WebSocket(started.wsUrl);
+          ws.addEventListener('open', () => process.stderr.write('[user-stream] connected\n'));
+          ws.addEventListener('message', (ev) => {
+            let m; try { m = JSON.parse(ev.data); } catch { return; }
+            emit(fmt(m));
+            if (m.e === 'listenKeyExpired') { try { ws.close(); } catch { /* reconnect via close handler */ } }
+          });
+          ws.addEventListener('close', () => {
+            if (!running) return;
+            process.stderr.write(`[user-stream] disconnected — reconnecting in ${backoff}ms\n`);
+            setTimeout(connect, (backoff = Math.min(backoff * 2, 30000)));
+          });
+          ws.addEventListener('error', () => { /* a 'close' event follows; reconnect there */ });
+          if (keepAlive) clearInterval(keepAlive);
+          keepAlive = setInterval(() => {
+            core.keepAliveUserStream({ market, account, listenKey }).catch((e) => process.stderr.write(`[user-stream] keepalive failed: ${e.message}\n`));
+          }, 30 * 60 * 1000);
+        };
+
+        await connect();
+        await new Promise(() => {}); // never resolves — runs until Ctrl-C (matches `tv binance stream`)
+      },
+    }],
     ['orders', {
       description: 'List open orders',
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'Filter by symbol' }, account: accountOpt },
@@ -234,7 +312,7 @@ register('binance', {
         totalNotional: { type: 'string', description: 'Total $ notional split evenly across rungs', oneOfGroup: 'ladder_size', mutuallyExclusiveGroup: 'ladder_size' },
         totalQuantity: { type: 'string', description: 'Total base qty split evenly across rungs', oneOfGroup: 'ladder_size', mutuallyExclusiveGroup: 'ladder_size' },
         positionSide: { type: 'string', description: 'Hedge mode: LONG | SHORT | BOTH' },
-        seed: { type: 'string', description: 'Optional MARKET seed quantity to open the position now' },
+        seed: { type: 'string', description: 'Optional MARKET seed quantity to open the position now (or "min" for the smallest valid size, so a closePosition stop can rest)' },
         stop: { type: 'string', description: 'Optional closePosition STOP_MARKET trigger price' },
         noPostOnly: { type: 'boolean', description: 'Disable default post-only on the rungs' },
         noRound: { type: 'boolean', description: 'Do not snap price/qty to tick/step' },
@@ -247,7 +325,8 @@ register('binance', {
         totalNotional: o.totalNotional !== undefined ? Number(o.totalNotional) : undefined,
         totalQuantity: o.totalQuantity !== undefined ? Number(o.totalQuantity) : undefined,
         positionSide: o.positionSide,
-        seedQuantity: o.seed !== undefined ? Number(o.seed) : undefined,
+        seedQuantity: o.seed === undefined ? undefined
+          : (String(o.seed).trim().toLowerCase() === 'min' ? 'min' : Number(o.seed)),
         stop: o.stop !== undefined ? Number(o.stop) : undefined,
         postOnly: !o.noPostOnly, round: !o.noRound, account: o.account, confirm: !!o.confirm,
       }),
@@ -329,14 +408,51 @@ register('binance', {
       }),
     }],
     ['ticker-24hr', {
-      description: '24-hour rolling price-change stats for a symbol (public)',
-      options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true } },
-      handler: (o) => core.get24hrTicker({ market: o.market || 'futures', symbol: o.symbol }),
+      description: '24-hour price-change stats; one --symbol, or --all (optionally --quote USDC) to scan every symbol',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC (omit with --all)' },
+        all: { type: 'boolean', description: 'Return every symbol on the market' },
+        quote: { type: 'string', short: 'q', description: 'With --all: keep only this quote asset, e.g. USDC' },
+      },
+      handler: (o) => core.get24hrTicker({ market: o.market || 'futures', symbol: o.symbol, all: !!o.all, quote: o.quote }),
     }],
     ['book-ticker', {
-      description: 'Best bid/ask (top of book) with computed spread (public)',
-      options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true } },
-      handler: (o) => core.getBookTicker({ market: o.market || 'futures', symbol: o.symbol }),
+      description: 'Best bid/ask + spread; one --symbol, or --all (optionally --quote USDC) to scan every symbol',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC (omit with --all)' },
+        all: { type: 'boolean', description: 'Return every symbol on the market' },
+        quote: { type: 'string', short: 'q', description: 'With --all: keep only this quote asset, e.g. USDC' },
+      },
+      handler: (o) => core.getBookTicker({ market: o.market || 'futures', symbol: o.symbol, all: !!o.all, quote: o.quote }),
+    }],
+    ['ui-klines', {
+      description: 'UI-optimized candlesticks (spot-only /uiKlines) — same shape as klines, tuned for charting',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        interval: { type: 'string', short: 'i', description: '1m,5m,15m,1h,4h,1d,… (default 1h)' },
+        startTime: { type: 'string', description: 'Start time in ms since epoch' },
+        endTime: { type: 'string', description: 'End time in ms since epoch' },
+        limit: { type: 'string', short: 'n', description: 'Bars (max 1000; default 500)' },
+      },
+      handler: (o) => core.getUiKlines({
+        market: o.market || 'spot', symbol: o.symbol, interval: o.interval || '1h',
+        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
+        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
+        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+      }),
+    }],
+    ['trading-day', {
+      description: 'Trading-day price-change stats (spot-only); one --symbol or a --symbols CSV, optional --timeZone',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC' },
+        symbols: { type: 'string', description: 'CSV list to scan, e.g. "BTCUSDC,ETHUSDC"' },
+        timeZone: { type: 'string', description: 'Trading-day offset, e.g. "0" (UTC) or "8"' },
+      },
+      handler: (o) => core.getTradingDayTicker({ market: o.market || 'spot', symbol: o.symbol, symbols: o.symbols, timeZone: o.timeZone }),
     }],
     ['funding', {
       description: 'Perpetual funding rate (public): current snapshot, or --history for recent payments',
@@ -354,13 +470,14 @@ register('binance', {
       handler: (o) => core.getAvgPrice({ market: o.market || 'spot', symbol: o.symbol }),
     }],
     ['rolling-ticker', {
-      description: 'Rolling-window price-change stats with a custom window (spot-only)',
+      description: 'Rolling-window price-change stats (spot-only); one --symbol or a --symbols CSV to scan a set',
       options: {
         market: marketOpt,
-        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC (omit when using --symbols)' },
+        symbols: { type: 'string', description: 'CSV list to scan, e.g. "BTCUSDC,ETHUSDC"' },
         windowSize: { type: 'string', short: 'w', description: 'e.g. "1d", "4h" (default 1d)' },
       },
-      handler: (o) => core.getRollingWindowTicker({ market: o.market || 'spot', symbol: o.symbol, windowSize: o.windowSize || '1d' }),
+      handler: (o) => core.getRollingWindowTicker({ market: o.market || 'spot', symbol: o.symbol, symbols: o.symbols, windowSize: o.windowSize || '1d' }),
     }],
     ['depth', {
       description: 'Order book depth (public)',
