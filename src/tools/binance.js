@@ -139,6 +139,64 @@ export function registerBinanceTools(server) {
     limit: z.coerce.number().optional().describe('Bars per symbol (min 30; default 200)'),
   }, wrap(core.correlateSymbols));
 
+  // ---- Backtesting & extended TA (computed off klines, public — no chart, no orders) ----
+  const interval = z.enum(['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']).default('1h');
+  const strategy = z.enum(['rsi', 'bollinger', 'macd', 'ema_cross', 'supertrend', 'donchian', 'rsi_pullback', 'keltner', 'triple_ema']);
+
+  server.tool('binance_backtest_strategy', 'Backtest one strategy over a symbol\'s klines (no chart, no orders). Enters at the next bar\'s open (no lookahead), charges commission+slippage on turnover, and returns institutional metrics: total/annualized return, Sharpe, Calmar, max drawdown, win rate, profit factor, expectancy, avg win/loss, best/worst trade, vs buy-&-hold. Strategies: rsi, bollinger, macd, ema_cross, supertrend, donchian, rsi_pullback, keltner, triple_ema.', {
+    market, symbol, interval,
+    strategy: strategy.default('ema_cross'),
+    limit: z.coerce.number().optional().describe('Bars to backtest (min 60; default 500; spot max 1000, futures max 1500)'),
+    commission: z.coerce.number().optional().describe('Per-side commission as a fraction (default 0.0004 = 0.04%)'),
+    slippage: z.coerce.number().optional().describe('Per-side slippage as a fraction (default 0.0005 = 0.05%)'),
+    allowShort: z.boolean().default(true).describe('Allow short positions (set false for spot/long-only)'),
+    includeTrades: z.boolean().default(false).describe('Attach the full trade log (can be large)'),
+    includeEquityCurve: z.boolean().default(false).describe('Attach the per-bar equity curve (can be large)'),
+  }, wrap(core.backtestStrategy));
+
+  server.tool('binance_compare_strategies', 'Run ALL 9 strategies on one symbol (one klines fetch) and return a ranked table sorted by a chosen metric. Quick read on which approach fits the current regime.', {
+    market, symbol, interval,
+    limit: z.coerce.number().optional().describe('Bars to backtest (min 60; default 500)'),
+    commission: z.coerce.number().optional(),
+    slippage: z.coerce.number().optional(),
+    allowShort: z.boolean().default(true),
+    sortBy: z.enum(['totalReturnPct', 'annualizedReturnPct', 'sharpe', 'calmar', 'winRatePct', 'profitFactor', 'maxDrawdownPct', 'expectancyPct']).default('totalReturnPct'),
+  }, wrap(core.compareStrategies));
+
+  server.tool('binance_walk_forward_backtest', 'Out-of-sample consistency check: backtest the strategy, then score the in-sample (first trainRatio) and out-of-sample windows separately and emit an overfitting verdict (ROBUST/MODERATE/WEAK/OVERFITTED/UNPROFITABLE). NOTE: fixed parameters (no grid optimization) — measures temporal robustness, not parameter-search overfitting.', {
+    market, symbol, interval,
+    strategy: strategy.default('ema_cross'),
+    limit: z.coerce.number().optional().describe('Bars (min 120; default 1000)'),
+    trainRatio: z.coerce.number().optional().describe('In-sample fraction, 0.1–0.95 (default 0.7)'),
+    commission: z.coerce.number().optional(),
+    slippage: z.coerce.number().optional(),
+    allowShort: z.boolean().default(true),
+  }, wrap(core.walkForwardBacktest));
+
+  server.tool('binance_get_multi_timeframe', 'Trend/momentum confluence across several timeframes: runs the technicals on each interval and reports whether they agree (bullish/bearish/neutral counts, a -1..1 score, a bias tag, and an aligned flag). Default timeframes 15m/1h/4h/1d.', {
+    market, symbol,
+    intervals: z.array(z.string()).optional().describe('Timeframes to check, e.g. ["15m","1h","4h","1d"] (default that set)'),
+  }, wrap(core.getMultiTimeframe));
+
+  server.tool('binance_scan_signals', 'Scan a candidate symbol list for a technical signal — oversold/overbought (RSI≤30/≥70), bullish/bearish (trend), or breakout/breakdown (close beyond a Bollinger band). One klines call per symbol (capped at 20). Returns matching symbols with RSI/trend/lastClose.', {
+    market,
+    symbols: z.array(z.string()).describe('Symbols to scan, e.g. ["BTCUSDC","ETHUSDC","SOLUSDC"]'),
+    signal: z.enum(['oversold', 'overbought', 'bullish', 'bearish', 'breakout', 'breakdown']).default('oversold'),
+    interval,
+  }, wrap(core.scanSignals));
+
+  server.tool('binance_detect_candlestick_patterns', 'Detect candlestick patterns off a symbol\'s recent klines (no chart): patterns on the latest bar plus any over the last `lookback` bars, each tagged bullish/bearish/neutral. Recognizes doji, hammer/hanging-man, shooting-star/inverted-hammer, marubozu, spinning-top, engulfing, harami, piercing-line/dark-cloud, tweezers, morning/evening star, three-soldiers/crows.', {
+    market, symbol, interval,
+    limit: z.coerce.number().optional().describe('Bars to pull (min 10; default 100)'),
+    lookback: z.coerce.number().optional().describe('How many recent bars to scan for patterns (default 5)'),
+  }, wrap(core.detectCandlestickPatterns));
+
+  server.tool('binance_get_signal', 'Composite BUY/SELL/HOLD decision for a symbol, scored off the technicals (price vs SMA200/EMA50, MACD histogram, RSI momentum, price vs VWAP, Bollinger %B) into one weighted -1..1 score with a confidence read and human-readable reasons. RSI extremes / narrow bands are surfaced as cautions (they lower confidence, never flip the call). mtf:true folds in multi-timeframe confluence (a few more klines calls). Pure aggregation — no orders.', {
+    market, symbol, interval,
+    limit: z.coerce.number().optional().describe('Bars to analyze (min 30; default 300)'),
+    mtf: z.boolean().default(false).describe('Also fold in 15m/1h/4h/1d trend confluence as an extra factor'),
+  }, wrap(core.getSignal));
+
   // ---- User-data stream (real-time push of fills/positions/balance) ----
   server.tool('binance_start_user_stream', 'Open a user-data stream: returns a listenKey + wsUrl for real-time PUSH of order fills, position and balance changes. Connect a WebSocket to wsUrl; refresh with keepalive every ~30 min. (For a ready-made live feed, run the `tv binance user-stream` CLI.)', {
     market, account,

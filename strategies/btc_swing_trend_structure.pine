@@ -1,0 +1,104 @@
+//@version=5
+// BTC Swing — Trend + Structure (4h execution, daily regime filter).
+// Synthesised from publicly documented methods: Peter Brandt (trade confirmed breaks,
+// no range trades, rigid fixed-% risk), Rekt Capital (market structure / regime),
+// Benjamin Cowen (long-MA regime band + RSI as confirmation), and trend-following
+// backtest literature (works in trends, fails in chop).
+//
+// Longs ONLY while daily close > SMA(200); shorts ONLY while daily close < SMA(200).
+// Entry on a CONFIRMED 4h close: Donchian(20) breakout OR pullback to a rising/falling
+// EMA(50), with RSI(14) confirming (>50 long / <50 short) and not already stretched.
+// Risk ~1% of equity per trade off an ATR stop, capped at 3x leverage. Exit on the ATR
+// stop, loss of the EMA(50), or a daily regime flip.
+strategy("BTC Swing — Trend+Structure (4h/1d)", overlay = true,
+     default_qty_type   = strategy.fixed,
+     default_qty_value  = 1,
+     initial_capital    = 10000,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.04,
+     slippage           = 5,
+     pyramiding         = 0,
+     calc_on_every_tick = false,
+     process_orders_on_close = true)
+
+// ---- Inputs ----
+emaLen     = input.int(50,    "Trend EMA (4h)")
+smaLen     = input.int(200,   "Daily regime SMA")
+donLen     = input.int(20,    "Donchian length")
+rsiLen     = input.int(14,    "RSI length")
+atrLen     = input.int(14,    "ATR length")
+atrMult    = input.float(2.0, "ATR stop multiple")
+rsiHiCap   = input.int(70,    "RSI long cap (skip if >=)")
+rsiLoCap   = input.int(30,    "RSI short cap (skip if <=)")
+riskPct    = input.float(1.0, "Risk % of equity per trade") / 100.0
+maxLev     = input.float(3.0, "Max leverage (notional/equity)")
+allowShort = input.bool(true, "Allow shorts")
+startY     = input.int(2018,  "Backtest start year")
+startM     = input.int(1,     "Backtest start month")
+startD     = input.int(1,     "Backtest start day")
+
+// ---- 4h series ----
+ema50 = ta.ema(close, emaLen)
+rsi   = ta.rsi(close, rsiLen)
+atr   = ta.atr(atrLen)
+donHi = ta.highest(high, donLen)[1]   // prior 20-bar high = breakout level
+donLo = ta.lowest(low,  donLen)[1]    // prior 20-bar low  = breakdown level
+
+// ---- Daily regime filter (no lookahead) ----
+dSma   = request.security(syminfo.tickerid, "D", ta.sma(close, smaLen), lookahead = barmerge.lookahead_off)
+dClose = request.security(syminfo.tickerid, "D", close,                  lookahead = barmerge.lookahead_off)
+regimeBull = dClose > dSma
+regimeBear = dClose < dSma
+
+// ---- Setups (evaluated on a confirmed bar close) ----
+breakoutUp = close > donHi
+pullbackUp = close > ema50 and low <= ema50          // tagged a rising EMA50, closed back above
+momUp      = rsi > 50 and rsi < rsiHiCap
+longSig    = regimeBull and (breakoutUp or pullbackUp) and momUp
+
+breakoutDn = close < donLo
+pullbackDn = close < ema50 and high >= ema50
+momDn      = rsi < 50 and rsi > rsiLoCap
+shortSig   = regimeBear and (breakoutDn or pullbackDn) and momDn
+
+inWindow = time >= timestamp(startY, startM, startD, 0, 0)
+
+// ---- Risk-based sizing, capped at maxLev ----
+qtyRisk = atr > 0 ? (riskPct * strategy.equity) / (atrMult * atr) : na
+qtyCap  = (maxLev * strategy.equity) / close
+qty     = math.min(qtyRisk, qtyCap)
+
+// ---- Entries ----
+if inWindow and strategy.position_size <= 0 and longSig and not na(qty)
+    strategy.entry("L", strategy.long, qty = qty)
+if inWindow and allowShort and strategy.position_size >= 0 and shortSig and not na(qty)
+    strategy.entry("S", strategy.short, qty = qty)
+
+// ---- Fix the protective stop at the entry bar (no drift) ----
+var float longStopPx  = na
+var float shortStopPx = na
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+    longStopPx := strategy.position_avg_price - atrMult * atr
+if strategy.position_size < 0 and strategy.position_size[1] >= 0
+    shortStopPx := strategy.position_avg_price + atrMult * atr
+
+// ---- Manage longs ----
+if strategy.position_size > 0
+    strategy.exit("L-stop", from_entry = "L", stop = longStopPx)
+    if close < ema50 or regimeBear
+        strategy.close("L", comment = "trend/regime exit")
+        longStopPx := na
+
+// ---- Manage shorts ----
+if strategy.position_size < 0
+    strategy.exit("S-stop", from_entry = "S", stop = shortStopPx)
+    if close > ema50 or regimeBull
+        strategy.close("S", comment = "trend/regime exit")
+        shortStopPx := na
+
+// ---- Visuals ----
+plot(ema50, "EMA 50", color = color.new(color.aqua, 0), linewidth = 2)
+plot(donHi, "Donchian high", color = color.new(color.orange, 40))
+plot(donLo, "Donchian low",  color = color.new(color.teal, 40))
+bgcolor(regimeBull ? color.new(color.green, 92) : regimeBear ? color.new(color.red, 92) : na)
+plot(strategy.position_size > 0 ? longStopPx : strategy.position_size < 0 ? shortStopPx : na, "Stop", color = color.red, style = plot.style_linebr, linewidth = 2)

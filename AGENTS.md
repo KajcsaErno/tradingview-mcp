@@ -70,23 +70,25 @@ assert(js.includes('"\\u0027); alert('));  // Verify it's escaped
 
 ## Binance module (separate integration — NOT CDP)
 
-`src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`, or `KNOWN_PATHS`. It is fully wired through all three layers (54 tools / 56 CLI subcommands):
+`src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`, or `KNOWN_PATHS`. It is fully wired through all three layers (61 tools / 63 CLI subcommands):
 
 - **Core:** `src/core/binance.js`
 - **MCP:** `src/tools/binance.js` — `registerBinanceTools(server)`, registered in `src/server.js`. (Binance **is** exposed over MCP.)
 - **CLI:** `src/cli/commands/binance.js` — `npm run tv -- binance <subcommand>`.
 
-**DI shape differs from the CDP modules:** instead of `{ evaluate, waitForChartReady }`, Binance functions take `_deps = { fetch, now, keys, sleep }`. Tests in `tests/binance.test.js` inject these (a mock `fetch`, fixed `now`, fake `keys`, and a no-op `sleep`) to assert on the exact requests built — **no network, no real keys**. Run `npm run test:binance` (159 tests).
+**DI shape differs from the CDP modules:** instead of `{ evaluate, waitForChartReady }`, Binance functions take `_deps = { fetch, now, keys, sleep, testnet, paperTrading }`. Tests in `tests/binance.test.js` inject these (a mock `fetch`, fixed `now`, fake `keys`, a no-op `sleep`, optional `testnet`, and optional `paperTrading`) to assert on the exact requests built — **no network, no real keys**. Run `npm run test:binance` (185 tests).
 
 **Invariants every Binance contributor must preserve:**
 - **Credentials:** `BINANCE_API_KEY`/`BINANCE_API_SECRET` (account "1"), plus `_2`/`_3`… for more accounts, from the environment or a gitignored `.env` (minimal loader, never overwrites existing env vars). See `.env.example`.
 - **Per-account key routing:** every signed/account-specific function takes `account` and resolves keys via `resolveDeps(account, _deps)` before calling `signedRequest({ …, _deps: deps })`. Omitting `account` silently falls back to account 1 — a dangerous bug (acting on the wrong account). The `tests/binance.test.js` "account routing" suite guards this; CLI/MCP wrappers must forward `account`.
-- **Dry-run by default:** all money-moving functions (`placeOrder`, `placeLadder`, `placeBracket`, `modifyOrder`, `ensureProtectiveStop`, `cancelAllOrders`, `mirrorOrder`, `mirrorBracket`, `transfer`) return a preview and send nothing unless `confirm: true`. Never auto-confirm.
+- **Dry-run by default:** all money-moving functions (`placeOrder`, `placeLadder`, `placeBracket`, `modifyOrder`, `ensureProtectiveStop`, `adjustIsolatedMargin`, `cancelAllOrders`, `mirrorOrder`, `mirrorBracket`, `transfer`) return a preview and send nothing unless `confirm: true`. Never auto-confirm.
 - **Post-only by default:** LIMIT → `GTX` (futures) / `LIMIT_MAKER` (spot); taker-only types require `allowTaker`.
 - **Hedge mode / precision / algo routing / clock-skew & 429-backoff:** see the "Binance module" section in `CLAUDE.md` for the full list — keep them intact.
 - **Validation:** numeric inputs go through `requireFinite()`; price/qty snap to tickSize/stepSize.
+- **Global testnet switch:** when `BINANCE_TESTNET` is truthy (or `_deps.testnet` in tests), host routing and key resolution switch to testnet credentials/hosts automatically.
+- **Global paper-trading kill-switch:** when `PAPER_TRADING`/`BINANCE_PAPER_TRADING` is truthy (or `_deps.paperTrading` in tests), every money-moving function forces `confirm = false` at its top → returns its dry-run preview (flagged `paper_trading:true`) and sends NOTHING, even with `confirm:true`. Unlike testnet, it places nothing anywhere. Any NEW money-mover must add the same `usePaperTrading(_deps)` gate.
 
-When adding a Binance tool, follow the same 4-step checklist below but use the `{ fetch, now, keys, sleep }` DI shape and add the route/assertion to `tests/binance.test.js` (not `sanitization.test.js`, which is for CDP injection).
+When adding a Binance tool, follow the same 4-step checklist below but use the `{ fetch, now, keys, sleep, testnet }` DI shape and add the route/assertion to `tests/binance.test.js` (not `sanitization.test.js`, which is for CDP injection).
 
 ## Core Module Patterns
 
@@ -220,10 +222,17 @@ const KNOWN_PATHS = {
 
 ### Unit Tests (No TradingView Required)
 
-**File**: `tests/sanitization.test.js`, `tests/cli.test.js`, `tests/pine_analyze.test.js`
+**File**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/binance.test.js`
 
 ```bash
 npm run test:unit
+```
+
+Additional targeted unit suites:
+
+```bash
+node --test tests/sanitization.test.js
+node --test tests/replay.test.js
 ```
 
 Use `mockDeps()` to capture generated JS expressions:
@@ -276,6 +285,7 @@ All output is JSON (piped to stdout), errors to stderr, exit codes: 0=ok, 1=erro
 npm test                # e2e + pine_analyze
 npm run test:unit       # unit tests only (no TradingView)
 npm run test:cli        # router tests
+npm run test:binance    # Binance unit tests only (no network)
 npm run test:all        # everything
 npm run test:verbose    # spec reporter
 ```

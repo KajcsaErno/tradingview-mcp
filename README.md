@@ -69,7 +69,7 @@ Gives your AI assistant eyes and hands on your own chart:
 - **Monitor your chart** — stream JSONL from your locally running chart for local monitoring scripts
 - **CLI access** — every MCP tool is also a `tv` CLI command, pipe-friendly with JSON output
 - **Launch TradingView** — auto-detect and launch with debug mode from any platform
-- **Binance trading (optional, separate)** — a standalone `tv binance` client (54 tools) places real Binance spot / USD-M / COIN-M orders via your own API keys; dry-run + post-only by default. Includes laddered scale-in, risk-based position sizing (with optional ATR-derived stops), a portfolio risk report, klines-based technical indicators + multi-symbol correlation, multi-account mirroring, a one-call market screener (`--all`), real-time order/position WebSocket push, and account monitoring. Independent of the TradingView bridge — see [Binance trading](#binance-trading-direct-api)
+- **Binance trading (optional, separate)** — a standalone `tv binance` client (61 tools) places real Binance spot / USD-M / COIN-M orders via your own API keys; dry-run + post-only by default. Includes laddered scale-in, risk-based position sizing (with optional ATR-derived stops), a portfolio risk report, klines-based technical indicators + multi-symbol correlation, a **strategy backtesting engine** (9 strategies with Sharpe/Calmar/max-drawdown/profit-factor, compare-all + walk-forward), multi-timeframe confluence, a composite BUY/SELL/HOLD **signal score**, signal scanning, candlestick-pattern detection, multi-account mirroring, a one-call market screener (`--all`), real-time order/position WebSocket push, and account monitoring. Independent of the TradingView bridge — see [Binance trading](#binance-trading-direct-api)
 
 ## Install with Claude Code
 
@@ -318,13 +318,16 @@ Keys are read from `.env` or the environment — never hardcoded, never committe
 
 **Testnet (paper trading):** set `BINANCE_TESTNET=1` to route every market to its testnet host (`testnet.binancefuture.com` / `testnet.binance.vision`) — no per-call `-m futures-testnet` needed. Order previews then report `live_funds:false`. Testnet uses its **own** API keys (mainnet keys don't work there); set `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_API_SECRET` (with the same `_2`/`_3`… suffix scheme). See `.env.example`. You can still target a single testnet market per call with `-m futures-testnet` without the global flag.
 
-**Tool groups (54 tools / 56 CLI subcommands):**
+**Paper-trading kill-switch:** set `PAPER_TRADING=true` (or `BINANCE_PAPER_TRADING=true`) to force **every** money-moving command into dry-run: it logs the full decision/preview but sends **nothing — even with `--confirm`**. Dry-run output carries `"paper_trading": true`. This is the master guard for running automation wired for live without risking a real fill: watch a few days of logged decisions, confirm the logic matches what you expect, then unset it to go live. Unlike `BINANCE_TESTNET` (which still *places* orders on the testnet exchange), paper trading places nothing anywhere; the two can be combined.
+
+**Tool groups (61 tools / 63 CLI subcommands):**
 
 | Group | Tools |
 |-------|-------|
 | **Reads** | `balance`, `account-summary`, `account-snapshot`, `risk-report`, `positions`, `orders`, `order-status`, `order-history`, `income`, `liquidation-history`, `account-trades`, `position-mode`, `leverage-brackets`, `commission`, `server-time` |
 | **Market data (public)** | `ticker`, `klines`, `ui-klines`, `ticker-24hr` (`--all [--quote USDC]`), `book-ticker` (`--all [--quote USDC]`), `trading-day`, `funding`, `avg-price`, `rolling-ticker` (`--symbols`), `compare` (`--symbols` ranked side-by-side), `depth`, `symbol-info`, `trades`, `agg-trades`, `historical`, `watch-price` (bounded live-WS OHLC/VWAP summary, `-d` 1-60s) |
-| **Technical analysis (computed off klines, public)** | `technicals` (RSI/ATR/MACD/SMA/EMA/Bollinger/VWAP + trend classification for one symbol), `correlate` (`--symbols`: per-symbol return/volatility/Sharpe/ATR%/RSI/trend + Pearson correlation matrix + rankings) |
+| **Technical analysis (computed off klines, public)** | `technicals` (RSI/ATR/MACD/SMA/EMA/Bollinger/VWAP + trend classification for one symbol), `correlate` (`--symbols`: per-symbol return/volatility/Sharpe/ATR%/RSI/trend + Pearson correlation matrix + rankings), `multi-timeframe` (trend confluence across `--intervals`), `scan-signals` (`--symbols --signal oversold\|overbought\|bullish\|bearish\|breakout\|breakdown`), `candles` (candlestick-pattern detection), `signal` (composite BUY/SELL/HOLD score + reasons; `--mtf` folds in multi-timeframe) |
+| **Backtesting (computed off klines, public — no orders)** | `backtest` (`--strategy` one of rsi/bollinger/macd/ema_cross/supertrend/donchian/rsi_pullback/keltner/triple_ema → Sharpe/Calmar/max-drawdown/profit-factor/expectancy/vs buy&hold), `compare-strategies` (rank all 9 by `--sortBy`), `walk-forward` (train/test out-of-sample verdict) |
 | **Orders & risk (money-moving, dry-run unless `--confirm`)** | `order`, `ladder`, `bracket`, `modify`, `ensure-stop`, `adjust-margin`, `cancel`, `cancel-all`, `cancel-algo`, `mirror-order`, `mirror-bracket`, `transfer` |
 | **Sizing & config** | `position-size` (pure calc; explicit `--stop` **or** ATR-derived via `--atrMult` + `--side`), `leverage`, `margin-type`, `set-position-mode` |
 | **Monitoring** | `stream` (polled JSONL on change), `user-stream` (real-time WebSocket push of fills/positions/balance), `market-stream` (real-time WebSocket push of public market data — `--symbols` × `--streams` trade/ticker/bookTicker/kline/markPrice/funding, JSONL), `account-snapshot` |
@@ -351,9 +354,9 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (133 MCP tools)
+## Tool Reference (140 MCP tools)
 
-The tables below cover the **79 TradingView chart tools**. The **54 Binance tools** are documented separately under [Binance trading](#binance-trading-direct-api).
+The tables below cover the **79 TradingView chart tools**. The **61 Binance tools** are documented separately under [Binance trading](#binance-trading-direct-api).
 
 ### Chart Reading
 
@@ -496,7 +499,7 @@ Test coverage: Pine Script static analysis, server-side compilation, CLI routing
 Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
 ```
 
-- **Transport**: MCP over stdio (133 tools — 79 TradingView + 54 Binance) + CLI (`tv` command; the `binance` command alone has 56 subcommands)
+- **Transport**: MCP over stdio (140 tools — 79 TradingView + 61 Binance) + CLI (`tv` command; the `binance` command alone has 63 subcommands)
 - **Connection**: Chrome DevTools Protocol on localhost:9222 (TradingView); signed REST to Binance (trading module, independent of CDP)
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout (`tv stream` for the chart, `tv binance stream` for account/positions)
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface` (the Binance module is zero-dep: HMAC signing + a tiny `.env` parser)
