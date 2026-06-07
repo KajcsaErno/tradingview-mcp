@@ -574,10 +574,12 @@ register('binance', {
       options: {
         underlying: { type: 'string', short: 'u', description: 'Underlying pair, e.g. BTCUSDT (default BTCUSDT)' },
         expirations: { type: 'string', short: 'e', description: 'CSV expiry filter in YYYYMMDD, e.g. "20260626,20260925"' },
+        full: { type: 'boolean', description: 'Include the full per-contract chain (greeks). Off by default — summary is per-expiry avg IV + ATM skew (can be 200KB+ with --full).' },
       },
       handler: (o) => core.getOptionsSurface({
         underlying: o.underlying || 'BTCUSDT',
         expirations: o.expirations ? String(o.expirations).split(',').map((x) => x.trim()).filter(Boolean) : undefined,
+        full: !!o.full,
       }),
     }],
     ['klines', {

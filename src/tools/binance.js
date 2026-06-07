@@ -291,6 +291,7 @@ export function registerBinanceTools(server) {
   server.tool('binance_get_options_surface', 'Binance Options implied-volatility surface + skew snapshot (public EAPI): per-contract markIV/bidIV/askIV/greeks, per-expiry average IV term structure, and ATM call-vs-put skew. This is the options-implied complement to binance_get_volatility_regime.', {
     underlying: z.string().default('BTCUSDT').describe('Underlying pair, e.g. BTCUSDT or ETHUSDT'),
     expirations: z.array(z.string()).optional().describe('Optional expiry filter list in YYYYMMDD format, e.g. ["20260626","20260925"]'),
+    full: z.boolean().default(false).describe('Include the full per-contract chain (every strike × side with greeks). Off by default — can be 200KB+. The summary returns per-expiry avg IV + ATM skew only.'),
   }, wrap(core.getOptionsSurface));
 
   server.tool('binance_get_account_trades', "User's account trades for a symbol (signed)", {

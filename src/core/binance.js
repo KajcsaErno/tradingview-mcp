@@ -1300,7 +1300,11 @@ export async function watchOrderFlow({ market = 'futures', symbol, durationSec =
   const setTimer = _deps.setTimeout || setTimeout;
   const clearTimer = _deps.clearTimeout || clearTimeout;
   const s = sym.toLowerCase();
-  const wsUrl = `${base}/stream?streams=${s}@aggTrade/${s}@depth${lv}@100ms/${s}@bookTicker`;
+  // Use @trade (raw trades) not @aggTrade: Binance's USD-M futures @aggTrade stream
+  // intermittently delivers nothing, silently zeroing the aggressive buy/sell metrics.
+  // @trade is reliable on both spot and futures and carries the same `m` (buyer-is-maker)
+  // aggressor flag, so the delta/VWAP math is identical.
+  const wsUrl = `${base}/stream?streams=${s}@trade/${s}@depth${lv}@100ms/${s}@bookTicker`;
 
   return new Promise((resolve, reject) => {
     let settled = false, timer = null, ws;
@@ -1378,7 +1382,7 @@ export async function watchOrderFlow({ market = 'futures', symbol, durationSec =
     ws.addEventListener('message', (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       const d = m?.data || m || {};
-      if (d.e === 'aggTrade') {
+      if (d.e === 'trade' || d.e === 'aggTrade') {
         const price = Number(d.p), qty = Number(d.q);
         if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
         const notional = price * qty;
@@ -1556,7 +1560,7 @@ const toExpCode = (ms) => {
  * Options IV/skew snapshot (public): builds an implied-vol surface from Binance Options mark data,
  * then reports per-expiry term structure and simple call-vs-put skew around ATM.
  */
-export async function getOptionsSurface({ underlying = 'BTCUSDT', expirations, _deps = {} } = {}) {
+export async function getOptionsSurface({ underlying = 'BTCUSDT', expirations, full = false, _deps = {} } = {}) {
   const u = String(underlying || '').trim().toUpperCase();
   if (!u) throw new Error('underlying is required (e.g. BTCUSDT)');
   const expFilter = new Set(
@@ -1644,7 +1648,10 @@ export async function getOptionsSurface({ underlying = 'BTCUSDT', expirations, _
     expirationsRequested: expFilter.size ? [...expFilter] : undefined,
     expiries,
     contracts: rows.length,
-    surface: rows,
+    // Per-contract rows (every strike × side, with full greeks) can be 200KB+. Default to the
+    // per-expiry ATM/skew summary only; pass full:true for the raw chain. (context-management rules)
+    surface: full ? rows : undefined,
+    surfaceOmitted: full ? undefined : `${rows.length} contracts — pass full:true to include the per-contract chain`,
     note: 'Implied volatility from Binance Options mark data. Skew is a simple ATM call-vs-put snapshot, not a full dealer vol model.',
   };
 }
