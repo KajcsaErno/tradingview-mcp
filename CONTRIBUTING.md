@@ -32,7 +32,8 @@ If you're unsure whether a feature fits, open an issue to discuss before submitt
 
 ```bash
 npm install
-npm test          # 29 offline tests (no TradingView needed)
+npm test          # full offline suite (no TradingView needed)
+npm run test:e2e  # live e2e — REQUIRES TradingView running on :9222
 tv status         # verify CDP connection (TradingView must be running)
 ```
 
@@ -40,5 +41,5 @@ tv status         # verify CDP connection (TradingView must be running)
 
 - Keep changes focused — one feature or fix per PR
 - Add tests for new functionality where possible
-- Ensure `npm test` passes (29/29)
-- Test against a live TradingView Desktop instance before submitting
+- Ensure the offline suite (`npm test`) passes; CI runs it on every push and PR
+- Test against a live TradingView Desktop instance (`npm run test:e2e`) before submitting

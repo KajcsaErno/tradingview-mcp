@@ -252,13 +252,14 @@ The third command is a preview unless you add `--confirm`.
 
 ## Testing
 
-```powershell
-npm run test:unit
+```bash
+npm test           # full offline suite — no TradingView needed
 npm run test:binance
-npm test
+npm run test:e2e   # live e2e — requires TradingView running on port 9222
 ```
 
-- `npm test` includes e2e tests that require TradingView running on port `9222`.
+- `npm test` runs the offline suite (pine_analyze + cli + morning + binance + sanitization + replay) and is what CI runs on every push and PR.
+- `npm run test:e2e` (and `npm run test:all`) require TradingView running on port `9222`.
 
 ## Architecture (simple view)
 
