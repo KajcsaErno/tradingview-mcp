@@ -1,542 +1,286 @@
-# TradingView MCP Bridge
+# TradingView MCP
 
-Personal AI assistant for your TradingView Desktop charts. Connects Claude Code to your locally running TradingView app via Chrome DevTools Protocol for AI-assisted chart analysis, Pine Script development, and workflow automation.
+`tradingview-mcp` lets an AI assistant work with your chart in TradingView Desktop and, optionally, your Binance account.
 
 > [!WARNING]
-> **This tool is not affiliated with, endorsed by, or associated with TradingView Inc.** It interacts with your locally running TradingView Desktop application via Chrome DevTools Protocol. Review the [Disclaimer](#disclaimer) before use.
+> This project is not affiliated with TradingView Inc.
 
 > [!IMPORTANT]
-> **Requires a valid TradingView subscription.** This tool does not bypass or circumvent any TradingView paywall or access control. It reads from and controls the TradingView Desktop app already running on your machine.
-
-> [!NOTE]
-> **All data processing occurs locally on your machine.** No TradingView data is transmitted, stored, or redistributed externally by this tool.
+> The TradingView side requires your own TradingView Desktop app and account. It does not bypass subscriptions or paywalls.
 
 > [!CAUTION]
-> This tool accesses undocumented internal TradingView APIs via the Electron debug interface. These can change or break without notice in any TradingView update. Pin your TradingView Desktop version if stability matters to you.
+> The Binance module is optional but can place real orders if you confirm them. Start with dry-runs and read the safety section first.
 
-## How It Works (and why it's safe to run)
+## What this project is
 
-This tool does not connect to TradingView's servers, modify any TradingView files, or intercept any network traffic. It communicates exclusively with your locally running TradingView Desktop instance via Chrome DevTools Protocol (CDP) — a standard debugging interface built into all Chromium/Electron applications by Google, including VS Code, Slack, and Discord.
+You get two separate modules in one repo:
 
-The debug port is disabled by default and must be explicitly enabled by you using a standard Chromium flag (`--remote-debugging-port=9222`). Nothing happens without that deliberate step.
+| Module | Connects to | What you can do | Why this is useful |
+|---|---|---|---|
+| TradingView tools | Your local TradingView Desktop app via Chrome DevTools Protocol (`localhost:9222`) | Read chart state, switch symbols/timeframes, manage indicators, replay, screenshots, Pine workflow | Great for chart analysis, Pine development, and workflow automation |
+| Binance tools (optional) | Binance REST/WebSocket APIs using your API keys | Read balances/positions, run technical analysis, backtest, size risk, preview/place orders | Great for execution and risk tooling outside of TradingView |
 
-## What This Tool Does Not Do
+The two modules are independent.
 
-- Connect to TradingView's servers or APIs
-- Store, transmit, or redistribute any market data
-- Work without a valid TradingView subscription and installed Desktop app
-- Bypass any TradingView paywall or access restriction
-- Execute trades **through TradingView** (the CDP bridge is chart-interaction only)
-- Work if TradingView changes their internal Electron structure
-
-> **Optional Binance module (separate from the above).** The repo also ships a standalone `tv binance` client (`src/core/binance.js`) that talks **directly to Binance's REST API** with your own API keys — independent of the TradingView/CDP bridge, and it **can place real orders**. Safeguards: orders are a **dry-run preview unless `--confirm`**, **post-only by default** (taker requires `--allowTaker`), keys are read only from a **gitignored `.env`**, and it does nothing at all unless you configure keys. See [Binance trading](#binance-trading-direct-api) below.
-
-## Research Context
-
-This project explores an open research question: **how can LLM-based agents interact with professional trading interfaces to support human decision-making?**
-
-Specifically it investigates:
-
-- How structured tool APIs (MCP) can bridge LLMs and stateful desktop financial applications
-- What latency, context, and reliability constraints emerge when an agent operates on live chart data
-- How agents handle ambiguous financial UI state (e.g. interpreting Pine Script output, reading indicator tables)
-- Whether natural language is an effective interface for chart navigation and Pine Script development
-- The failure modes of LLM agents operating in real-time data environments
-
-This is not a trading bot. It is an interface layer that makes a trading application legible to an LLM agent, allowing researchers and developers to study human-AI collaboration in financial workflows.
-
-See [RESEARCH.md](RESEARCH.md) for open questions, findings, and related work.
+- TradingView module does not place trades through TradingView.
+- Binance module does not require TradingView to be open.
+- TradingView module talks to your local desktop app over a debug port you enable.
 
 ## Prerequisites
 
-- **TradingView Desktop app** (paid subscription required for real-time data)
-- **Node.js 18+**
-- **Claude Code** with MCP support (for MCP tools) or any terminal (for CLI)
-- **macOS, Windows, or Linux**
+- TradingView Desktop installed (for chart tools)
+- Node.js 18+
+- Claude Code with MCP support (for tool use through chat), or terminal access for CLI
+- Binance API keys only if you plan to use `tv binance`
 
-## What It Does
+## Quick glossary (new-user friendly)
 
-Gives your AI assistant eyes and hands on your own chart:
+- `Symbol`: the market ticker, like `AAPL` or `BTCUSDC`.
+- `Timeframe`: chart interval, like `1m`, `15m`, `1h`, `D`.
+- `Indicator`: calculation shown on chart (RSI, MACD, moving averages).
+- `Pine Script`: TradingView's scripting language for indicators/strategies.
+- `Spot`: buying/selling the asset directly.
+- `Futures`: leveraged derivatives market.
+- `Dry-run`: preview only, no live order is sent.
+- `Post-only`: order must add liquidity (maker), not take it.
 
-- **Pine Script development** — write, inject, compile, debug, and iterate on scripts with AI assistance
-- **Chart navigation** — change symbols, timeframes, zoom to dates, add/remove indicators
-- **Visual analysis** — read your chart's indicator values, price levels, and annotations
-- **Draw on charts** — trend lines, horizontal lines, rectangles, text annotations
-- **Manage alerts** — create, list, and delete price alerts
-- **Replay practice** — step through historical bars, practice entries/exits
-- **Screenshots** — capture chart state for AI visual analysis
-- **Multi-pane layouts** — set up 2x2, 3x1, etc. grids with different symbols per pane
-- **Monitor your chart** — stream JSONL from your locally running chart for local monitoring scripts
-- **CLI access** — every MCP tool is also a `tv` CLI command, pipe-friendly with JSON output
-- **Launch TradingView** — auto-detect and launch with debug mode from any platform
-- **Binance trading (optional, separate)** — a standalone `tv binance` client (61 tools) places real Binance spot / USD-M / COIN-M orders via your own API keys; dry-run + post-only by default. Includes laddered scale-in, risk-based position sizing (with optional ATR-derived stops), a portfolio risk report, klines-based technical indicators + multi-symbol correlation, a **strategy backtesting engine** (9 strategies with Sharpe/Calmar/max-drawdown/profit-factor, compare-all + walk-forward), multi-timeframe confluence, a composite BUY/SELL/HOLD **signal score**, signal scanning, candlestick-pattern detection, multi-account mirroring, a one-call market screener (`--all`), real-time order/position WebSocket push, and account monitoring. Independent of the TradingView bridge — see [Binance trading](#binance-trading-direct-api)
+## Quick start (Windows-first)
 
-## Install with Claude Code
+### 1) Install
 
-Paste this into Claude Code and it will handle the rest:
-
-> Install the TradingView MCP server. Clone https://github.com/tradesdontlie/tradingview-mcp.git, run npm install, add it to my MCP config at ~/.claude/.mcp.json, and launch TradingView with the debug port. Then verify the connection with tv_health_check.
-
-Or follow the manual steps below.
-
-## Quick Start
-
-### 1. Install
-
-```bash
+```powershell
 git clone https://github.com/tradesdontlie/tradingview-mcp.git
-cd tradingview-mcp
+Set-Location .\tradingview-mcp
 npm install
 ```
 
-### 2. Launch TradingView with CDP
+### 2) Launch TradingView Desktop with debug port enabled
 
-TradingView Desktop must be running with Chrome DevTools Protocol enabled on port 9222.
+From the repo root:
 
-**Mac:**
-```bash
-./scripts/launch_tv_debug_mac.sh
+```powershell
+.\scripts\launch_tv_debug.bat
 ```
 
-**Windows:**
-```bash
-scripts\launch_tv_debug.bat
+If you are on Mac/Linux instead, use `scripts/launch_tv_debug_mac.sh` or `scripts/launch_tv_debug_linux.sh`.
+
+### 3) Verify TradingView connection
+
+```powershell
+npm run tv -- status
 ```
 
-**Linux:**
-```bash
-./scripts/launch_tv_debug_linux.sh
+### 4) Start the MCP server
+
+```powershell
+npm start
 ```
 
-**Or launch manually on any platform:**
-```bash
-/path/to/TradingView --remote-debugging-port=9222
-```
+### 5) Add to Claude Code MCP config
 
-**Or use the MCP tool** (auto-detects your install):
-> "Use tv_launch to start TradingView in debug mode"
-
-### 3. Add to Claude Code
-
-Add to your Claude Code MCP config (`~/.claude/.mcp.json` or project `.mcp.json`):
+Use your local absolute path:
 
 ```json
 {
   "mcpServers": {
     "tradingview": {
       "command": "node",
-      "args": ["/path/to/tradingview-mcp/src/server.js"]
+      "args": ["/absolute/path/to/tradingview-mcp/src/server.js"]
     }
   }
 }
 ```
 
-Replace `/path/to/tradingview-mcp` with your actual path.
+## First 10-minute wins
 
-### 4. Verify
+Try these right away:
 
-Ask Claude: *"Use tv_health_check to verify TradingView is connected"*
-
-## CLI
-
-Every MCP tool is also accessible as a `tv` CLI command. All output is JSON for piping with `jq`.
-
-```bash
-# Install globally (optional)
-npm link
-
-# Or run directly
-node src/cli/index.js <command>
+```powershell
+npm run tv -- state
+npm run tv -- symbol AAPL
+npm run tv -- timeframe 60
+npm run tv -- quote
+npm run tv -- ohlcv --summary
+npm run tv -- values
+npm run tv -- screenshot -r chart
+npm run tv -- pane layout 2x2
 ```
 
-### Quick Examples
+Why these are good:
 
-```bash
-tv status                          # check connection
-tv quote                           # current price
-tv symbol AAPL                     # change symbol
-tv ohlcv --summary                 # price summary
-tv screenshot -r chart             # capture chart
-tv pine compile                    # compile Pine Script
-tv pane layout 2x2                 # 4-chart grid
-tv pane symbol 1 ES1!              # set pane symbol
-tv stream quote | jq '.close'      # monitor price changes
-```
+- You confirm the pipeline works end to end.
+- You learn the core chart controls fast.
+- You get useful output immediately without writing code.
 
-### Binance CLI examples
+## TradingView tools: what each tool group does, why it is good, and examples
 
-All commands take `--account 1|2|3…` (default `1`) to target a specific API-key set, and `-m spot|futures|coinm` (default `futures`).
+| Tool group | What you can do | Why it is good | Example |
+|---|---|---|---|
+| Health and launch (`tv_health_check`, `tv_launch`, `tv_discover`, `tv_ui_state`) | Check connection, launch app, inspect API/UI availability | Saves time when setup breaks | `npm run tv -- status` |
+| Chart snapshot (`chart_get_state`, `quote_get`, `data_get_study_values`) | Read current symbol, timeframe, price, and indicator values | Fast chart summary before deeper analysis | `npm run tv -- state` |
+| Price bars (`data_get_ohlcv`) | Get OHLCV bars or compact summary | Lets you analyze structure and volatility quickly | `npm run tv -- ohlcv --summary` |
+| Pine drawings data (`data_get_pine_lines`, `data_get_pine_labels`, `data_get_pine_tables`, `data_get_pine_boxes`) | Extract levels, labels, tables, zones drawn by custom Pine indicators | Makes custom indicator output machine-readable | `npm run tv -- data lines -f Profiler` |
+| Chart control (`chart_set_symbol`, `chart_set_timeframe`, `chart_set_type`, `chart_scroll_to_date`, `chart_set_visible_range`) | Navigate any market quickly | Faster than manual clicking during analysis loops | `npm run tv -- symbol ES1!` |
+| Symbol discovery (`symbol_search`, `symbol_info`) | Search symbols and inspect metadata | Helps beginners find correct tickers | `npm run tv -- search crude oil` |
+| Indicator management (`chart_manage_indicator`, `indicator_set_inputs`, `indicator_toggle_visibility`, `data_get_indicator`) | Add/remove indicators and change settings | Useful for building repeatable chart templates | `npm run tv -- indicator add "Relative Strength Index"` |
+| Multi-pane layouts (`pane_list`, `pane_set_layout`, `pane_focus`, `pane_set_symbol`) | Build multi-chart dashboards | Great for watching multiple symbols/timeframes | `npm run tv -- pane layout 2x2` |
+| Tab management (`tab_list`, `tab_new`, `tab_switch`, `tab_close`) | Manage chart tabs from CLI/MCP | Keeps workflows organized without mouse-heavy navigation | `npm run tv -- tab list` |
+| Pine editor workflow (`pine_set_source`, `pine_smart_compile`, `pine_get_errors`, `pine_get_console`, `pine_save`, `pine_open`, `pine_list_scripts`) | Write, compile, debug, save Pine scripts | Huge speed boost for Pine iteration | `npm run tv -- pine compile` |
+| Replay practice (`replay_start`, `replay_step`, `replay_autoplay`, `replay_trade`, `replay_status`, `replay_stop`) | Practice execution on historical bars | Useful for training and process discipline | `npm run tv -- replay start -d 2025-03-01` |
+| Drawings (`draw_shape`, `draw_list`, `draw_remove_one`, `draw_clear`) | Draw lines/zones/text and manage them | Good for marking plans and reviewing decisions | `npm run tv -- draw list` |
+| Alerts (`alert_create`, `alert_list`, `alert_delete`, `alert_activate`) | Create and manage chart alerts | Great for not missing planned levels | `npm run tv -- alert create --price 60000 --condition crossing --message "BTC level"` |
+| Watchlist (`watchlist_get`, `watchlist_add`) | Read or update watchlist | Keeps a curated market list synced with your workflow | `npm run tv -- watchlist add BTCUSDC` |
+| Layout and UI automation (`layout_list`, `layout_switch`, `ui_click`, `ui_keyboard`, `ui_open_panel`, `ui_find_element`, `ui_evaluate`, etc.) | Automate repetitive UI actions | Useful when no direct chart API exists for a step | `npm run tv -- layout list` |
+| Screenshots (`capture_screenshot`) | Capture full/chart/strategy tester views | Easy visual record for journaling and review | `npm run tv -- screenshot -r strategy_tester` |
+| Batch workflows (`batch_run`) | Run the same action across multiple symbols | Efficient multi-symbol scans | Use MCP `batch_run` with `symbols` list |
+| Streaming (CLI: `tv stream quote|bars|values|lines|labels|tables|all`) | Emit JSONL updates continuously | Good for local monitoring scripts and dashboards | `npm run tv -- stream quote -i 300` |
+| Morning workflow (`morning_brief`, `session_save`, `session_get`) | Run a rules-based morning scan and store briefs | Creates repeatable daily prep habits | `npm run tv -- brief` |
 
-```bash
-# --- reads (no funds at risk) ---
-tv binance balance                                  # account balances (futures by default)
-tv binance balance --account 2                      # a second API-key set
-tv binance positions                                # open futures positions
-tv binance account-summary                          # wallet/margin balance, uPnL, margin ratio
-tv binance risk-report                              # per-position liq distance, % of equity, exposure
-tv binance ticker --symbol BTCUSDC                  # latest price (public)
-tv binance klines --symbol BTCUSDC -i 1h -n 100     # candlesticks for the exact contract (public)
-tv binance ticker-24hr --symbol BTCUSDC             # 24h change/high/low/volume (public)
-tv binance book-ticker --symbol BTCUSDC             # best bid/ask + computed spread (public)
-tv binance funding --symbol BTCUSDC                 # perpetual funding rate (public)
-tv binance income --symbol BTCUSDC                  # realized PnL / funding / commissions, summarized
-tv binance order-history --symbol BTCUSDC           # all orders: open, filled, cancelled
-tv binance symbol-info --symbol BTCUSDC             # tick/step/minNotional filters
-tv binance leverage-brackets --symbol BTCUSDC       # max-leverage tiers per notional
-tv binance position-mode                            # Hedge Mode vs one-way
-
-# --- risk sizing (pure calc) ---
-# From entry/stop + risk budget → quantity, notional, required margin (warns if it breaks 3x):
-tv binance position-size --symbol BTCUSDC --entry 60000 --stop 58900 --riskPct 1 --leverage 3
-
-# --- placing orders (DRY-RUN unless --confirm; post-only unless --noPostOnly) ---
-# Post-only limit (defaults to GTX on futures / LIMIT_MAKER on spot):
-tv binance order --symbol BTCUSDC --side BUY --type LIMIT --quantity 0.001 --price 60000
-
-# Hedge-mode accounts must pass --positionSide:
-tv binance order --symbol BTCUSDC --side SELL --type LIMIT -q 1 -p 64800 --positionSide SHORT --confirm
-
-# Taker order types (MARKET / STOP_MARKET / TAKE_PROFIT_MARKET) require --allowTaker:
-tv binance order --symbol BTCUSDC --side BUY --type MARKET -q 0.01 --allowTaker --confirm
-
-# Scale in with a ladder of N post-only rungs across a range, optional seed + protective stop:
-tv binance ladder --symbol BTCUSDC --side BUY --lo 59800 --hi 60500 --count 50 \
-  --totalNotional 100000 --positionSide LONG --seed 0.001 --stop 58900   # add --confirm to place
-
-# One-shot bracket: entry (post-only LIMIT) + protective stop + take-profits:
-tv binance bracket --symbol BTCUSDC --side SELL -q 1 \
-  --entryType LIMIT --entryPrice 64800 --stop 67500 --tp 61300:0.5 --tp 60000:0.5 \
-  --hedge --allowTaker            # add --confirm to actually place
-
-# Ensure an open position has a protective stop (places one only if missing):
-tv binance ensure-stop --symbol BTCUSDC --stop 58900     # add --confirm to place
-
-# Amend a resting LIMIT order in place (no cancel+replace):
-tv binance modify --symbol BTCUSDC --orderId 123456789 --side BUY -q 0.033 -p 60100 --confirm
-
-# Mirror one order across accounts, sized by balance ratio (DRY-RUN unless --confirm):
-tv binance mirror-order --symbol BTCUSDC --side BUY --type LIMIT -q 0.01 -p 60000 \
-  --positionSide LONG --accounts 1,2
-
-# Futures config + cancels:
-tv binance leverage --symbol BTCUSDC --leverage 3 --account 2
-tv binance set-position-mode --hedge --account 2     # switch Hedge/one-way (idempotent)
-tv binance margin-type --symbol BTCUSDC --marginType CROSSED
-tv binance cancel --symbol BTCUSDC --orderId 123456789
-tv binance cancel-all --symbol BTCUSDC --confirm
-tv binance cancel-algo --algoId 1000001871754500     # cancel a conditional/stop (algo) order
-
-# Monitor account/position state — JSONL on every change (Ctrl-C to stop):
-tv binance stream --symbol BTCUSDC --account 1
-tv binance account-snapshot --account 1              # one-shot compact snapshot
-
-# Wallet transfer (DRY-RUN unless --confirm; needs "Universal Transfer" enabled on the key):
-tv binance transfer --asset USDC --amount 100 --from futures --to spot
-tv binance transfer-history --from futures --to spot
-```
-
-### All Commands
-
-```
-tv status / launch / state / symbol / timeframe / type / info / search
-tv quote / ohlcv / values
-tv data lines/labels/tables/boxes/strategy/trades/equity/depth/indicator
-tv pine get/set/compile/analyze/check/save/new/open/list/errors/console
-tv draw shape/list/get/remove/clear
-tv alert list/create/delete
-tv watchlist get/add
-tv indicator add/remove/toggle/set/get
-tv layout list/switch
-tv pane list/layout/focus/symbol
-tv tab list/new/close/switch
-tv replay start/step/stop/status/autoplay/trade
-tv stream quote/bars/values/lines/labels/tables/all
-tv ui click/keyboard/hover/scroll/find/eval/type/panel/fullscreen/mouse
-tv screenshot / discover / ui-state / range / scroll
-tv binance balance/account-summary/account-snapshot/risk-report/positions/stream
-tv binance orders/order-status/order-history/order/modify/cancel/cancel-all/cancel-algo
-tv binance ladder/bracket/ensure-stop/position-size
-tv binance ticker/klines/ticker-24hr/book-ticker/funding/avg-price/rolling-ticker/depth
-tv binance symbol-info/leverage-brackets/trades/agg-trades/historical/account-trades/income
-tv binance leverage/margin-type/position-mode/set-position-mode/commission/server-time
-tv binance mirror-order/mirror-bracket/transfer/transfer-history
-```
-
-All `tv binance` commands accept `--account <n>` (multi-account, default `1`) and `-m spot|futures|coinm`.
-
-## Streaming
-
-The `tv stream` commands poll your locally running TradingView Desktop instance at regular intervals via Chrome DevTools Protocol on localhost.
-
-No connection is made to TradingView's servers. All data stays on your machine.
-
-> [!WARNING]
-> Programmatic consumption of TradingView data may conflict with their Terms of Use regardless of the data source. You are solely responsible for ensuring your usage complies.
-
-```bash
-tv stream quote                          # price tick monitoring
-tv stream bars                           # bar-by-bar updates
-tv stream values                         # indicator value monitoring
-tv stream lines --filter "NY Levels"     # price level monitoring
-tv stream tables --filter Profiler       # table data monitoring
-tv stream all                            # all panes at once (multi-symbol)
-```
-
-## Binance trading (direct API)
+## Optional Binance module (direct API)
 
 > [!CAUTION]
-> This is a **separate, optional** component that places **real orders on your Binance account** using **your own API keys**. It is independent of the TradingView/CDP bridge — TradingView is not involved in execution. Cryptocurrency trading carries substantial risk of loss. You are solely responsible for every order placed.
+> Binance commands can touch real funds when `--confirm` is used.
 
-`src/core/binance.js` (and the matching `tv binance` CLI / `binance_*` MCP tools) talk directly to Binance's signed REST API. It is unrelated to TradingView and only does something once you provide keys.
+### Minimal setup
 
-**Setup:** copy `.env.example` to `.env` (gitignored) and fill in your keys. Multiple accounts are supported — the unsuffixed pair is account `1`, and `_2` / `_3` / … add more (used by `--account` and the mirror tools):
+1) Copy env template:
 
-```
-BINANCE_API_KEY=...
-BINANCE_API_SECRET=...
-BINANCE_API_KEY_2=...
-BINANCE_API_SECRET_2=...
+```powershell
+Copy-Item .env.example .env
 ```
 
-Keys are read from `.env` or the environment — never hardcoded, never committed. Restrict the key to trading (no withdrawals) and ideally to your IP. See `.env.example` for the full template and recommended permissions.
+2) Fill at least:
 
-**Safety model (built in):**
+```dotenv
+BINANCE_API_KEY=your_key
+BINANCE_API_SECRET=your_secret
+```
 
-| Guard | Behavior |
-|-------|----------|
-| **Dry-run by default** | `order`, `bracket`, and `cancel-all` return a preview and send nothing unless you pass `--confirm` / `confirm:true`. |
-| **Post-only by default** | LIMIT orders are maker-only (futures `GTX`, spot `LIMIT_MAKER`). Disable per-order with `--noPostOnly`. |
-| **Taker opt-in** | `MARKET` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` are blocked unless you pass `--allowTaker` (they cannot be post-only). |
-| **Hedge-mode aware** | In Hedge Mode, orders require `--positionSide LONG\|SHORT`; `placeOrder` auto-detects and refuses to guess. `bracket` derives it from `--side` (`--hedge`). |
-| **Precision rounding** | Price/quantity snap to the symbol's tickSize/stepSize so orders aren't rejected (`--noRound` to disable). |
-| **Algo routing** | Conditional orders (STOP / TP) auto-route to Binance's algo endpoint (`/fapi/v1/algoOrder`) per the 2025-12 migration; `get-open-orders` merges them; `cancel-algo` / `cancel-all` clear them. |
-| **Clock-skew guard** | Signed requests auto-resync to Binance server time and retry once on a `-1021` timestamp error. |
-| **Rate-limit backoff** | Signed requests retry `429` / `418` with `Retry-After`/exponential backoff (hardens the ladder & batch paths). |
-| **Multi-account** | Every command takes `--account 1\|2\|3…`; keys resolve per account. Leverage / margin-type / position-mode are NOT mirrored — set them per account. |
+3) Optional safety switches:
 
-`market` is `futures` (USD-M) by default; pass `-m spot` for spot or `-m coinm` for COIN-M. `leverage`, `margin-type`, `position-mode`, `account-summary`, `risk-report`, `bracket`, and `ladder` are futures-only.
+```dotenv
+BINANCE_TESTNET=1
+PAPER_TRADING=true
+```
 
-**Testnet (paper trading):** set `BINANCE_TESTNET=1` to route every market to its testnet host (`testnet.binancefuture.com` / `testnet.binance.vision`) — no per-call `-m futures-testnet` needed. Order previews then report `live_funds:false`. Testnet uses its **own** API keys (mainnet keys don't work there); set `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_API_SECRET` (with the same `_2`/`_3`… suffix scheme). See `.env.example`. You can still target a single testnet market per call with `-m futures-testnet` without the global flag.
+Notes:
 
-**Paper-trading kill-switch:** set `PAPER_TRADING=true` (or `BINANCE_PAPER_TRADING=true`) to force **every** money-moving command into dry-run: it logs the full decision/preview but sends **nothing — even with `--confirm`**. Dry-run output carries `"paper_trading": true`. This is the master guard for running automation wired for live without risking a real fill: watch a few days of logged decisions, confirm the logic matches what you expect, then unset it to go live. Unlike `BINANCE_TESTNET` (which still *places* orders on the testnet exchange), paper trading places nothing anywhere; the two can be combined.
+- `BINANCE_TESTNET=1` routes requests to Binance testnet hosts.
+- `PAPER_TRADING=true` forces money-moving commands to preview only, even if `--confirm` is passed.
 
-**Tool groups (61 tools / 63 CLI subcommands):**
+## Binance tools: what each tool group does, why it is good, and examples
 
-| Group | Tools |
-|-------|-------|
-| **Reads** | `balance`, `account-summary`, `account-snapshot`, `risk-report`, `positions`, `orders`, `order-status`, `order-history`, `income`, `liquidation-history`, `account-trades`, `position-mode`, `leverage-brackets`, `commission`, `server-time` |
-| **Market data (public)** | `ticker`, `klines`, `ui-klines`, `ticker-24hr` (`--all [--quote USDC]`), `book-ticker` (`--all [--quote USDC]`), `trading-day`, `funding`, `avg-price`, `rolling-ticker` (`--symbols`), `compare` (`--symbols` ranked side-by-side), `depth`, `symbol-info`, `trades`, `agg-trades`, `historical`, `watch-price` (bounded live-WS OHLC/VWAP summary, `-d` 1-60s) |
-| **Technical analysis (computed off klines, public)** | `technicals` (RSI/ATR/MACD/SMA/EMA/Bollinger/VWAP + trend classification for one symbol), `correlate` (`--symbols`: per-symbol return/volatility/Sharpe/ATR%/RSI/trend + Pearson correlation matrix + rankings), `multi-timeframe` (trend confluence across `--intervals`), `scan-signals` (`--symbols --signal oversold\|overbought\|bullish\|bearish\|breakout\|breakdown`), `candles` (candlestick-pattern detection), `signal` (composite BUY/SELL/HOLD score + reasons; `--mtf` folds in multi-timeframe) |
-| **Backtesting (computed off klines, public — no orders)** | `backtest` (`--strategy` one of rsi/bollinger/macd/ema_cross/supertrend/donchian/rsi_pullback/keltner/triple_ema → Sharpe/Calmar/max-drawdown/profit-factor/expectancy/vs buy&hold), `compare-strategies` (rank all 9 by `--sortBy`), `walk-forward` (train/test out-of-sample verdict) |
-| **Orders & risk (money-moving, dry-run unless `--confirm`)** | `order`, `ladder`, `bracket`, `modify`, `ensure-stop`, `adjust-margin`, `cancel`, `cancel-all`, `cancel-algo`, `mirror-order`, `mirror-bracket`, `transfer` |
-| **Sizing & config** | `position-size` (pure calc; explicit `--stop` **or** ATR-derived via `--atrMult` + `--side`), `leverage`, `margin-type`, `set-position-mode` |
-| **Monitoring** | `stream` (polled JSONL on change), `user-stream` (real-time WebSocket push of fills/positions/balance), `market-stream` (real-time WebSocket push of public market data — `--symbols` × `--streams` trade/ticker/bookTicker/kline/markPrice/funding, JSONL), `account-snapshot` |
-| **Wallet (read-only, spot host, mainnet)** | `transfer-history`, `deposit-history`, `withdraw-history`, `deposit-address` |
+| Tool group | What you can do | Why it is good | Example |
+|---|---|---|---|
+| Account reads (`balance`, `account-summary`, `account-snapshot`, `positions`, `risk-report`) | Inspect balances, positions, risk, and margin health | Gives immediate account clarity | `npm run tv -- binance account-summary` |
+| Order and fill history (`orders`, `order-status`, `order-history`, `account-trades`, `income`, `liquidation-history`) | Audit what happened and what it cost | Essential for post-trade review and debugging | `npm run tv -- binance order-history --symbol BTCUSDC` |
+| Public market data (`ticker`, `book-ticker`, `ticker-24hr`, `klines`, `depth`, `funding`, `trades`, `agg-trades`, `historical`) | Pull exchange data without TradingView | Useful for scripts and scanners | `npm run tv -- binance klines --symbol BTCUSDC -i 1h -n 200` |
+| Advanced market scans (`compare`, `watch-price`, `ui-klines`, `trading-day`, `rolling-ticker`, `avg-price`) | Compare symbols and inspect short-term microstructure | Helps pick cleaner setups | `npm run tv -- binance compare --symbols BTCUSDC,ETHUSDC,SOLUSDC` |
+| Technical analysis (`technicals`, `correlate`, `multi-timeframe`, `scan-signals`, `candles`, `signal`) | Compute indicators, correlations, patterns, and directional scores | Reduces manual indicator checking | `npm run tv -- binance technicals --symbol BTCUSDC -i 1h` |
+| Backtesting (`backtest`, `compare-strategies`, `walk-forward`) | Evaluate strategy logic on historical klines | Good for filtering weak ideas before live risk | `npm run tv -- binance backtest --symbol BTCUSDC --strategy ema_cross -i 1h` |
+| Risk math (`position-size`, `expectancy`, `losing-streak`, `simulate-equity`) | Size positions and model outcome distributions | Prevents random sizing decisions | `npm run tv -- binance position-size --symbol BTCUSDC --entry 60000 --stop 58900 --riskPct 1 --leverage 3` |
+| Futures account config (`position-mode`, `set-position-mode`, `leverage`, `margin-type`, `adjust-margin`, `leverage-brackets`, `commission`, `server-time`) | Configure and inspect futures settings and constraints | Reduces order rejections and risk mismatch | `npm run tv -- binance leverage --symbol BTCUSDC --leverage 3` |
+| Single-order flow (`order`, `modify`, `cancel`, `cancel-all`, `cancel-algo`) | Preview/place/edit/cancel orders | Core execution controls with safety defaults | `npm run tv -- binance order --symbol BTCUSDC --side BUY --type LIMIT --quantity 0.001 --price 60000` |
+| Structured execution (`ladder`, `bracket`, `ensure-stop`) | Build scale-ins and protection plans in one flow | Better risk discipline than one-off manual clicks | `npm run tv -- binance bracket --symbol BTCUSDC --side BUY --quantity 0.01 --entryType LIMIT --entryPrice 60000 --stop 58900 --tp 62000:0.5 --tp 63000:0.5` |
+| Multi-account mirroring (`mirror-order`, `mirror-bracket`) | Replicate trades across accounts with size scaling | Useful for master/follower account setups | `npm run tv -- binance mirror-order --symbol BTCUSDC --side BUY --type LIMIT --quantity 0.01 --price 60000 --accounts 1,2` |
+| Wallet and transfers (`transfer`, `transfer-history`, `deposit-history`, `withdraw-history`, `deposit-address`) | Move funds and audit wallet activity | Helpful for operational bookkeeping | `npm run tv -- binance transfer --asset USDC --amount 100 --from futures --to spot` |
+| Streams (`stream`, `user-stream`, `market-stream`) | Live JSONL updates for account or market events | Useful for monitoring and alerts | `npm run tv -- binance user-stream --account 1` |
 
-**COIN-M futures (`-m coinm`)** has the same commands as USD-M — reads, order placement, brackets, cancels, leverage, and margin-type — routed to the coin-margined (`dapi`) API. **One critical difference: COIN-M `--quantity` is in CONTRACTS** (a fixed USD notional each, e.g. $100/contract for BTC), not coin amount. Order previews include a `coinm_note` reminder, and `symbol-info` reports `contractSize`.
+## Binance safety defaults you should know
 
-See [Binance CLI examples](#binance-cli-examples) above for usage.
+These defaults are intentionally strict:
 
-## How Claude Knows Which Tool to Use
+| Safety behavior | What it means |
+|---|---|
+| Dry-run by default | Money-moving commands preview only until you pass `--confirm` |
+| Post-only defaults for LIMIT | Helps avoid accidental taker fills |
+| Taker-only orders require opt-in | `MARKET` and related taker types need explicit `--allowTaker` |
+| Hedge mode awareness | Functions require or derive `positionSide` where needed |
+| Precision snapping | Price/quantity are rounded to exchange rules unless disabled |
+| Testnet switch | `BINANCE_TESTNET=1` routes to testnet hosts |
+| Paper-trading kill-switch | `PAPER_TRADING=true` forces preview-only behavior globally |
 
-Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project. It contains a complete decision tree:
+## Prompt examples for MCP users (Claude Code)
 
-| You say... | Claude uses... |
-|------------|---------------|
-| "What's on my chart?" | `chart_get_state` → `data_get_study_values` → `quote_get` |
-| "What levels are showing?" | `data_get_pine_lines` → `data_get_pine_labels` |
-| "Read the session table" | `data_get_pine_tables` with `study_filter` |
-| "Give me a full analysis" | `quote_get` → `data_get_study_values` → `data_get_pine_lines` → `data_get_pine_labels` → `data_get_pine_tables` → `data_get_ohlcv` (summary) → `capture_screenshot` |
-| "Switch to AAPL daily" | `chart_set_symbol` → `chart_set_timeframe` |
-| "Write a Pine Script for..." | `pine_set_source` → `pine_smart_compile` → `pine_get_errors` |
-| "Start replay at March 1st" | `replay_start` → `replay_step` → `replay_trade` |
-| "Set up a 4-chart grid" | `pane_set_layout` → `pane_set_symbol` for each pane |
-| "Draw a level at 24500" | `draw_shape` (horizontal_line) |
-| "Take a screenshot" | `capture_screenshot` |
+Use prompts like these:
 
-## Tool Reference (140 MCP tools)
+- "Use `chart_get_state`, `data_get_study_values`, and `quote_get`, then explain my chart in plain English."
+- "Use `data_get_pine_lines` with `study_filter: \"Profiler\"` and list key levels."
+- "Switch to `BTCUSDC` on 1H and take a chart screenshot."
+- "Set this Pine code with `pine_set_source`, compile, and fix any errors."
+- "Start replay on 2025-03-01 and walk me through one-bar-at-a-time practice."
+- "Run `binance_calc_position_size` with 1% risk and 3x leverage and explain the output."
+- "Preview a Binance bracket order first (no confirm), then ask me before live placement."
+- "Run `binance_get_risk_report` for account 1 and summarize top risks."
 
-The tables below cover the **79 TradingView chart tools**. The **61 Binance tools** are documented separately under [Binance trading](#binance-trading-direct-api).
+## Common beginner workflows
 
-### Chart Reading
+### 1) Quick chart read in under 30 seconds
 
-| Tool | When to use | Output size |
-|------|------------|-------------|
-| `chart_get_state` | First call — get symbol, timeframe, all indicator names + IDs | ~500B |
-| `data_get_study_values` | Read current RSI, MACD, BB, EMA values from all indicators | ~500B |
-| `quote_get` | Get latest price, OHLC, volume | ~200B |
-| `data_get_ohlcv` | Get price bars. **Use `summary: true`** for compact stats | 500B (summary) / 8KB (100 bars) |
+```powershell
+npm run tv -- state
+npm run tv -- quote
+npm run tv -- values
+npm run tv -- ohlcv --summary
+```
 
-### Custom Indicator Data (Pine Drawings)
+### 2) Morning prep routine
 
-Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any visible Pine indicator.
+```powershell
+npm run tv -- brief
+npm run tv -- session save --brief "Key levels and bias for today"
+npm run tv -- session get
+```
 
-| Tool | When to use | Output size |
-|------|------------|-------------|
-| `data_get_pine_lines` | Read horizontal price levels (support/resistance, session levels) | ~1-3KB |
-| `data_get_pine_labels` | Read text annotations + prices ("PDH 24550", "Bias Long") | ~2-5KB |
-| `data_get_pine_tables` | Read data tables (session stats, analytics dashboards) | ~1-4KB |
-| `data_get_pine_boxes` | Read price zones / ranges as {high, low} pairs | ~1-2KB |
+### 3) Safer Binance execution flow
 
-**Always use `study_filter`** to target a specific indicator: `study_filter: "Profiler"`.
+```powershell
+npm run tv -- binance symbol-info --symbol BTCUSDC
+npm run tv -- binance position-size --symbol BTCUSDC --entry 60000 --stop 58900 --riskPct 1 --leverage 3
+npm run tv -- binance order --symbol BTCUSDC --side BUY --type LIMIT --quantity 0.001 --price 60000
+```
 
-### Chart Control
+The third command is a preview unless you add `--confirm`.
 
-| Tool | What it does |
-|------|-------------|
-| `chart_set_symbol` | Change ticker (BTCUSD, AAPL, ES1!, NYMEX:CL1!) |
-| `chart_set_timeframe` | Change resolution (1, 5, 15, 60, D, W, M) |
-| `chart_set_type` | Change style (Candles, HeikinAshi, Line, Area, Renko) |
-| `chart_manage_indicator` | Add/remove indicators. **Use full names**: "Relative Strength Index" not "RSI" |
-| `chart_scroll_to_date` | Jump to a date (ISO: "2025-01-15") |
-| `chart_set_visible_range` | Zoom to exact range (unix timestamps) |
-| `symbol_info` / `symbol_search` | Symbol metadata and search |
-| `indicator_set_inputs` / `indicator_toggle_visibility` | Change indicator settings, show/hide |
+## Troubleshooting
 
-### Multi-Pane Layouts
-
-| Tool | What it does |
-|------|-------------|
-| `pane_list` | List all panes with symbols and active state |
-| `pane_set_layout` | Change grid: `s`, `2h`, `2v`, `2x2`, `4`, `6`, `8` |
-| `pane_focus` | Focus a specific pane by index |
-| `pane_set_symbol` | Set symbol on any pane |
-
-### Tab Management
-
-| Tool | What it does |
-|------|-------------|
-| `tab_list` | List open chart tabs |
-| `tab_new` / `tab_close` | Open/close tabs |
-| `tab_switch` | Switch to a tab by index |
-
-### Pine Script Development
-
-| Tool | Step |
-|------|------|
-| `pine_set_source` | 1. Inject code into editor |
-| `pine_smart_compile` | 2. Compile with auto-detection + error check |
-| `pine_get_errors` | 3. Read compilation errors if any |
-| `pine_get_console` | 4. Read log.info() output |
-| `pine_save` | 5. Save to TradingView cloud |
-| `pine_get_source` | Read current script (**warning: can be 200KB+ for complex scripts**) |
-| `pine_new` | Create blank indicator/strategy/library |
-| `pine_open` / `pine_list_scripts` | Open or list saved scripts |
-| `pine_analyze` | Offline static analysis (no chart needed) |
-| `pine_check` | Server-side compile check (no chart needed) |
-
-### Replay Mode
-
-| Tool | Step |
-|------|------|
-| `replay_start` | Enter replay at a date |
-| `replay_step` | Advance one bar |
-| `replay_autoplay` | Auto-advance (set speed in ms) |
-| `replay_trade` | Buy/sell/close positions |
-| `replay_status` | Check position, P&L, date |
-| `replay_stop` | Return to realtime |
-
-### Drawing, Alerts, UI Automation
-
-| Tool | What it does |
-|------|-------------|
-| `draw_shape` | Draw horizontal_line, trend_line, rectangle, text |
-| `draw_list` / `draw_remove_one` / `draw_clear` | Manage drawings |
-| `alert_create` / `alert_list` / `alert_delete` | Manage price alerts |
-| `capture_screenshot` | Screenshot (regions: full, chart, strategy_tester) |
-| `batch_run` | Run action across multiple symbols/timeframes |
-| `watchlist_get` / `watchlist_add` | Read/modify watchlist |
-| `layout_list` / `layout_switch` | Manage saved layouts |
-| `ui_open_panel` / `ui_click` / `ui_evaluate` | UI automation |
-| `tv_launch` / `tv_health_check` / `tv_discover` | Connection management |
-
-## Context Management
-
-Tools return compact output by default to minimize context usage. For a typical "analyze my chart" workflow, total context is ~5-10KB instead of ~80KB.
-
-| Feature | How it saves context |
-|---------|---------------------|
-| Pine lines | Returns deduplicated price levels only, not every line object |
-| Pine labels | Capped at 50 per study, text+price only |
-| Pine tables | Pre-formatted row strings, no cell metadata |
-| Pine boxes | Deduplicated {high, low} zones only |
-| OHLCV summary mode | Stats + last 5 bars instead of all bars |
-| Indicator inputs | Encrypted/encoded blobs auto-filtered |
-| `verbose: true` | Pass on any pine tool to get raw data with IDs/colors when needed |
-| `study_filter` | Target one indicator instead of scanning all |
-
-## Finding TradingView on Your System
-
-Launch scripts and `tv_launch` auto-detect TradingView. If auto-detection fails:
-
-| Platform | Common Locations |
-|----------|-----------------|
-| **Mac** | `/Applications/TradingView.app/Contents/MacOS/TradingView` |
-| **Windows** | `%LOCALAPPDATA%\TradingView\TradingView.exe`, `%PROGRAMFILES%\WindowsApps\TradingView*\TradingView.exe` |
-| **Linux** | `/opt/TradingView/tradingview`, `~/.local/share/TradingView/TradingView`, `/snap/tradingview/current/tradingview` |
-
-The key flag: `--remote-debugging-port=9222`
+- `status` fails: relaunch TradingView with debug port enabled.
+- Pine drawing tools return little/no data: make sure the indicator is visible.
+- Indicator add fails: use full indicator names, not abbreviations (`Relative Strength Index`, not `RSI`).
+- Binance signed command fails: check `.env` keys and `--account` selection.
+- Binance execution safety: keep `PAPER_TRADING=true` while testing automation.
 
 ## Testing
 
-```bash
-# Requires TradingView running with --remote-debugging-port=9222
+```powershell
+npm run test:unit
+npm run test:binance
 npm test
 ```
 
-```bash
-# No TradingView needed (pure unit tests):
-npm run test:unit                  # pine_analyze + CLI routing
-node --test tests/binance.test.js  # 90 Binance unit tests (DI-mocked, no network)
-node --test tests/sanitization.test.js   # CDP injection-prevention tests
+- `npm test` includes e2e tests that require TradingView running on port `9222`.
+
+## Architecture (simple view)
+
+```text
+MCP client  -> src/tools/*         -> src/core/* -> src/connection.js -> TradingView Desktop (CDP)
+CLI (tv)    -> src/cli/commands/*  -> src/core/* -> src/connection.js -> TradingView Desktop (CDP)
+CLI/MCP     -> src/core/binance.js -> Binance REST/WS APIs (optional, separate)
 ```
 
-Test coverage: Pine Script static analysis, server-side compilation, CLI routing, CDP injection prevention, and the Binance module (90 tests — post-only/taker gates, dry-run guards, hedge mode, precision, algo routing, **per-account key routing**, ladder/batch, risk sizing, rate-limit backoff — all via injected `_deps`, no live API).
+Key design notes:
 
-## Architecture
+- Core logic lives in `src/core/*`.
+- MCP and CLI layers are thin adapters.
+- TradingView input safety uses `safeString()` and `requireFinite()`.
+- Binance module is separate and dependency-injected for testability.
 
-```
-Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
-```
+## Legal and risk disclaimer
 
-- **Transport**: MCP over stdio (140 tools — 79 TradingView + 61 Binance) + CLI (`tv` command; the `binance` command alone has 63 subcommands)
-- **Connection**: Chrome DevTools Protocol on localhost:9222 (TradingView); signed REST to Binance (trading module, independent of CDP)
-- **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout (`tv stream` for the chart, `tv binance stream` for account/positions)
-- **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface` (the Binance module is zero-dep: HMAC signing + a tiny `.env` parser)
+This project is for personal, educational, and research use.
 
-## Attributions
-
-This project is not affiliated with, endorsed by, or associated with:
-- **TradingView Inc.** — TradingView is a trademark of TradingView Inc.
-- **Anthropic** — Claude and Claude Code are trademarks of Anthropic, PBC.
-
-This tool is an independent MCP server that connects to Claude Code via the standard MCP protocol. It does not contain or modify any Anthropic software.
-
-## Disclaimer
-
-This project is provided **for personal, educational, and research purposes only**.
-
-**How this tool works:** This tool uses the Chrome DevTools Protocol (CDP), a standard debugging interface built into all Chromium-based applications by Google. It does not reverse engineer any proprietary TradingView protocol, connect to TradingView's servers, or bypass any access controls. The debug port must be explicitly enabled by the user via a standard Chromium command-line flag (`--remote-debugging-port=9222`).
-
-By using this software, you acknowledge and agree that:
-
-1. **You are solely responsible** for ensuring your use of this tool complies with [TradingView's Terms of Use](https://www.tradingview.com/policies/) and all applicable laws.
-2. TradingView's Terms of Use **restrict automated data collection, scraping, and non-display usage** of their platform and data. This tool uses Chrome DevTools Protocol to programmatically interact with the TradingView Desktop app, which may conflict with those terms.
-3. **You assume all risk** associated with using this tool. The authors are not responsible for any account bans, suspensions, legal actions, or other consequences resulting from its use.
-4. This tool **must not be used** for, including but not limited to:
-   - Redistributing, reselling, or commercially exploiting TradingView's market data
-   - Circumventing TradingView's access controls or subscription restrictions
-   - Performing automated trading or algorithmic decision-making using extracted data
-   - Violating the intellectual property rights of Pine Script indicator authors
-   - Connecting to TradingView's servers or infrastructure (all access is via the locally running Desktop app)
-5. The streaming functionality monitors your locally running TradingView Desktop instance only. It does not connect to TradingView's servers or extract data from TradingView's infrastructure.
-6. Market data accessed through this tool remains subject to exchange and data provider licensing terms. **Do not redistribute, store, or commercially exploit any data obtained through this tool.**
-7. This tool accesses internal, undocumented TradingView application interfaces that may change or break at any time without notice.
-
-**Use at your own risk.** If you are unsure whether your intended use complies with TradingView's terms, do not use this tool.
+You are responsible for complying with TradingView and Binance terms, exchange data licensing, and applicable laws. Market data and trading involve risk, and Binance execution can result in real financial loss.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
-
-The MIT license applies to the source code of this project only. It does not grant any rights to TradingView's software, data, trademarks, or intellectual property.
+MIT. See `LICENSE`.

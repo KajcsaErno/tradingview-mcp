@@ -61,6 +61,59 @@ register('binance', {
         round: !o.noRound, account: o.account,
       }),
     }],
+    ['expectancy', {
+      description: 'Expectancy from a win rate + reward:risk: expectancy in R, break-even win rate (1/(1+rr)), and $/% projections over N trades',
+      options: {
+        winRate: { type: 'string', description: 'Win rate as a percent, e.g. 50', required: true },
+        rrRatio: { type: 'string', description: 'Reward:risk ratio, e.g. 2 for 2:1', required: true },
+        riskPct: { type: 'string', description: 'Risk per trade as % of account' },
+        riskAmount: { type: 'string', description: 'Risk per trade in $' },
+        balance: { type: 'string', description: 'Balance, to turn --riskPct into $' },
+        trades: { type: 'string', description: 'Sample size for the projection (default 100)' },
+      },
+      handler: (o) => core.calcExpectancy({
+        winRate: Number(o.winRate), rrRatio: Number(o.rrRatio),
+        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
+        riskAmount: o.riskAmount !== undefined ? Number(o.riskAmount) : undefined,
+        balance: o.balance !== undefined ? Number(o.balance) : undefined,
+        trades: o.trades !== undefined ? Number(o.trades) : undefined,
+      }),
+    }],
+    ['losing-streak', {
+      description: 'Longest losing streak to expect over a sample size for a win rate (ln(N)/ln(1/lossRate)); --riskPct adds the implied drawdown',
+      options: {
+        winRate: { type: 'string', description: 'Win rate as a percent, strictly 0–100', required: true },
+        sampleSize: { type: 'string', description: 'Trades to plan over (default 1000)' },
+        riskPct: { type: 'string', description: 'Risk per trade as % — adds worst-streak drawdown' },
+      },
+      handler: (o) => core.estimateLosingStreak({
+        winRate: Number(o.winRate),
+        sampleSize: o.sampleSize !== undefined ? Number(o.sampleSize) : undefined,
+        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
+      }),
+    }],
+    ['simulate-equity', {
+      description: 'Monte Carlo equity sim: final-return & max-drawdown percentiles, longest losing streak, % profitable and % ruined across many random trade sequences',
+      options: {
+        winRate: { type: 'string', description: 'Win rate as a percent 0–100', required: true },
+        rrRatio: { type: 'string', description: 'Reward:risk ratio, e.g. 2', required: true },
+        riskPct: { type: 'string', description: 'Risk per trade as % of balance (default 1)' },
+        startBalance: { type: 'string', description: 'Starting balance (default 10000)' },
+        trades: { type: 'string', description: 'Trades per run (default 1000, max 100000)' },
+        runs: { type: 'string', description: 'Independent runs (default 1000, max 10000)' },
+        noCompounding: { type: 'boolean', description: 'Risk a fixed % of the starting balance instead of the current balance' },
+        ruinDrawdownPct: { type: 'string', description: 'Drawdown %% that counts as ruin (default 50)' },
+      },
+      handler: (o) => core.simulateEquity({
+        winRate: Number(o.winRate), rrRatio: Number(o.rrRatio),
+        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
+        startBalance: o.startBalance !== undefined ? Number(o.startBalance) : undefined,
+        trades: o.trades !== undefined ? Number(o.trades) : undefined,
+        runs: o.runs !== undefined ? Number(o.runs) : undefined,
+        compounding: !o.noCompounding,
+        ruinDrawdownPct: o.ruinDrawdownPct !== undefined ? Number(o.ruinDrawdownPct) : undefined,
+      }),
+    }],
     ['stream', {
       description: 'Poll account/position state and emit JSONL on change (Ctrl-C to stop); --once for a single snapshot',
       options: {

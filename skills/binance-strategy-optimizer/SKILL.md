@@ -11,7 +11,7 @@ server, no chart, **no orders ever placed**. All math runs off klines.
 
 The 9 strategies: `rsi`, `bollinger`, `macd`, `ema_cross`, `supertrend`, `donchian`,
 `rsi_pullback` (long-only), `keltner`, `triple_ema`.
-
+c
 ## Search space
 
 - **Symbols:** the user's `watchlist` from `rules.json`, else `BTCUSDC`. USDC pairs only (user rule).

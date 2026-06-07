@@ -1,0 +1,200 @@
+YouTube Video Transcript
+Video URL: https://youtu.be/FGLuyx0aM-I
+Video ID: FGLuyx0aM-I
+Source: Apify actor pintostudio/youtube-transcript-scraper
+Generated: 2026-06-07 13:28:25 +02:00
+
+1. [00:00 - 02:03]
+- in this video we're going to break down some of the basic mathematics of winning in trading here I've put $500 on black on roulette I'll show you the outcome at the end of the video but in the meantime I'd like to break
+- down some basic mathematical theory in relation to trading financial markets using this roulette spin as an example of probability Theory considering about 80% of my audience are not profitable Traders I think many of
+- you are going to find this particular video very helpful in better understanding what constitutes an effective trading strategy you don't have to understand this theory in order to be a profitable Trader but every
+- profitable Trader exploits this Theory whether they know it or not as you'll see later in the video I not promoting gambling in fact I'll make a very good case on why you shouldn't gamble but in saying that if this bet
+- wins I'll donate the money to charity [Music]. none of the material in this video is financial advice I'm experienced in managing my own finances but I'm not qualified to give anyone advice on what to buy or sell you
+- should always do your own research and due diligence before engaging in trading or investing and please seek professional guidance if you need it let's go on a mathematical Journey don't worry it's not as boring as it
+- sounds here's a quick breakdown of what we're going to cover in today's video there'll be time stamps below first let's cover the mathematics of expectancy basically the interplay between our our win rate and our risk
+- reward ratio is what determines our expectancy expectancy is how much we can expect to make per trade on average over a sample size so for a trading analogy let's assume we have a 50% win rate with a risk reward profile
+- of 2:1 so for every trade we lose we lose a dollar for every trade we win we win two bucks so with a 50% win rate 2 to1 risk reward if we were to risk 100 bucks per trade over about 100 trades we should expect to make
+- about $5,000 assuming we have fixed risk reward and fixed risk per trade in
+
+2. [02:02 - 04:03]
+- dollar amounts this formula doesn't consider slippage commission drag or compounding in most cases we're not going to be risking $100 per trade we're going to risk a percentage of our account balance which will grow our
+- risk proportionate to the growth in our account balance so that positively skews our expectancy over time and also don't forget tax tax has a big impact on the profitability of a system these are things Traders don't
+- typically consider and they wonder why their systems profitable paper but when they go to trade it they're not making money we need to consider these factors when we're developing systems now most trading systems
+- typically don't have a fixed risk reward profile some do but most systems have a dynamic risk reward so Trend falling systems for example they're not going to have a fixed risk reward however this isn't financial advice
+- but in my early days when I started trading back in 2017 so about 7 years ago now I started in the late 2017 the thing that turned my trading around and took me from being a consistent loser to actually being consistent
+- instantly profitable for a few months in a row was trading a fixed risk reward system I was shooting for 2 to1 risk reward I had a win rate of about 40 something per and I made money about 3 or 4 months in a row and it
+- was a huge breakthrough for me now some of my systems in the Forex markets still use fixed risk reward profiles but most of my systems have Dynamic risk reward and I no longer stick to that but in the beginning of my
+- trading career this really helped me understanding this math applying it to my trading systems is what turned my trading around and gave me that breakthrough from being a consistent loser to actually making money so
+- don't underestimate the power of fixed risk reward profiles especially if you're struggling as a Trader executing a system with a fixed risk reward instills discipline it instills confidence uh consistency most
+- importantly and just instills good habits in your trading you don't move your stop loss you don't move your target you're just always shooting for that fix risk reward in my experience in my own trading that is what
+- helped me cross the threshold from struggling as a Trader to being profitable understanding
+
+3. [04:01 - 06:02]
+- the mathematics of expectancy also helps us to understand why risk management is so important so let's apply all of this to my little roulette spin at the start of the video so American roulette has 38 Pockets 1 through
+- 36 and two zeros it has zero and double zero so two green on the wheel if you're betting on black or red and the ball lands in one of the zeros you lose so this skews the probability it's not 50/50 uh like some people
+- might think betting on black on a American roulette gives me a win probability of about 47% so it's not a coin toss that's the house Edge the only other uh form of gambling that comes close to this sort of win rate is
+- Blackjack that's the only other game where the house Edge is Slim um other than poker obviously poker is a totally different uh bag of worms for lack of a better word because poker you're you're not competing against the
+- house you're competing against other players so of all forms of gambling poker has the most in common with trading but to keep things simple I want to stick to this uh roulette example so if I would have bet on black on
+- American roulette I'd have a 47% chance of winning so my expectancy would be negative five bucks per every $100 I spend so at best if I'm really really lucky over a long sample of of bets I'll leave the casino down five
+- bucks for every $100 I've bet and that's assuming that I get lucky and that uh I don't encounter a losing streak which we'll get to later this is probably the best Dodge you'll get in Casino outside of Europe the reason
+- I say outside of Europe is because in Europe the roulette wheel only has a single zero so we still have numbers 1 through 36 but instead of two zeros we have one that skews the probability of winning positively by a
+- small fraction but it counts so betting on black on European Roulette gives me a win rate of about 48.6% which is a little bit closer to 5050 and my expectancy is now losing $2.70 per $100 B bet versus five bucks
+
+4. [06:01 - 08:03]
+- so that's a pretty big change in my expectancy simply by choosing a different game to play or different variation of the game I'm not telling you guys to gamble this should be an anti-gambling video of anything by the
+- end of this you should not want to gamble you should want to stay away from casinos because you'll better understand the house Edge but if you're going to gamble like I did for this example video you got to be smart
+- about it being a better Trader has made me a better Gambler for one I don't gamble very often at all and if I do gamble I know when I'm lucky and when to quit when to leave but anyway all of this is to say uh trading is
+- a lot like gambling it's a lot like gambling except we as Traders can have the house Edge we can be the casino if we structure our trading appropriately so moving on another important concept to understand as a Trader is
+- when it comes to risk reward profile you pay for what you get so here is a simulation of the expectancy curve by Nick Raj this was on one of his posts a while back and it's in one of his books this shows the inverse
+- correlation between win percentage so win rate and risk reward profile or win loss ratio so you'll see here that if you're shooting for a five or more risk reward profile you are typically going to encounter a win rate
+- below 20% the more profit you shoot for the more likely you're going to lose it just this is just basic theory if you're shooting for a really long far away profit Target but you're managing your risk and constraining
+- your risk so you have a really large profit Target but pretty tight risk you're going to hit your risk way more often than your profit Target that's just simple probability Theory and so be prepared for that be prepared
+- for that ideally we want to be around this range here somewhere between 40 and 60% is a pretty good range if you shoot for really tight uh risk reward and sure you can get a 70 plus% win rate but the robustness of that
+- system can be fragile because we really really depend on that
+
+5. [08:01 - 10:03]
+- win rate we really need to be correct way more often than we're wrong in order to turn a profit with a inverse risk reward personally depending on the system I shoot for at least a 0.9 risk-reward profile with a 60 plus%
+- win rate some of my mean reversion systems have a 60 plus% win rate but they rarely take more than 90 cents for every dollar I risk but that's profitable as you'll see later I have some spreadsheets you can play around
+- with plug some of these numbers in and see the expectancy and the win rate how all of these numbers interplay with each other and then we have uh Trend following systems which are closer to the 40% uh range but now we're
+- looking at 1.5 and above in terms of risk reward now this is a rough theoretical estimation of of these numbers and how they interplay with each other but in my experience in the past six seven years of trading it's
+- pretty accurate the rule of thumb is the more profit you shoot for the higher your risk reward the lower your win rate is going to be there's just no way around that and it's just a matter of preference and personality
+- you know there are really great ways to make a lot of money with a high win rate and a uh small risk reward and there are great ways to make money with a large risk reward and a low win rate if you can stomach the lower
+- win rate I personally find that an easier way to trade because you're not so dependent on wins if you can stomach a lot of losses a lot of small losses uh then shooting for a large profit of 2 3 to one really isn't that
+- difficult the hard part is sticking with the system during the losing streaks but making the system itself profitable is a lot easier I find when I'm shooting for a higher risk reward but the cost is you're going to lose
+- more often you're going to be in draw down more often and that is not tolerable for a lot of Traders now technically speaking on this graph here anything that falls Beyond this line on this side is profitable but in my
+- experience and from all the literature I've read on trading psychology and just general human psychology when it comes to pain tolerance for there's been a lot of studies
+
+6. [10:00 - 12:04]
+- um on how losing and winning affects human psychology and many human beings struggle to play any game where they lose 40% or more of the time you can overpower that you can overcome that I have uh to a large degree in my
+- own trading for me personally I am all in on the idea that if it makes money and it's robust then it can be traded I really don't mind but I have to admit it is more comfortable to trade systems that win more than 40% of
+- the time as you go down the win rate ladder it gets stressful it does get stressful the draw Downs last longer um technically you can potentially make more money on this end of the spectrum because you can shoot for
+- larger reward but the pain to achieve that reward should not be underestimated psychologically so this is just something that's worth factoring into system design and development so let's talk about losing streaks losing
+- streaks are always a risk in trading and they cannot be avoided please don't try to avoid them draw Downs are inevitable we affectionately refer to losing streaks as Traders as draw Downs I say affectionately uh a bit
+- tongue and cheek none of us like draw downs but they are the cost of doing business in the market there is no way around them even Warren Buffett experiences drawdowns the best Traders on the planet experience draw Downs
+- you cannot get around them don't even try it's a Fool's errand you will not succeed in getting around draw Downs sure there are ways to mitigate them to minimize them but you cannot avoid a draw down so don't go looking
+- for that system system that never encounters bad draw Downs because you'll be looking forever and you will never ever find success as a Trader the real question is what kind of draw down can you stomach and structuring a
+- trading system around that number so for most Traders it's around 10 20% of their capital is about the maximum of their comfort zone I tend to be a bit higher I can stomach around 30 35% but that's because I'm a lot
+- younger than some Traders I have a lot more time to work with you know unlike my parents my parents are looking looking to retire soon they can't still
+
+7. [12:00 - 14:03]
+- make a 35% draw down in their net worth because that will screw up their retirement for me uh I'm happy taking on more risk it means more returns over the long run at least for the next 10 years or so I don't I know I
+- don't look it but I'm currently 34 years old so you know I've got a good 10 years of high-risk trading in me before I think I would need to start uh reigning that in a bit and protecting my capital A bit more that's a
+- luur I have so with all that said it's important to understand that even a 90% win rate in trading can theoretically still lose 100 trades in a row now this is astronomically unlikely it's practically impossible but it's
+- not literally impossible the chance isn't zero there is still an above 0% chance that with a 90% win rate you could lose 100 trades in a row now you would be the most unlucky human being in the history of the planet but
+- it's important to understand the theory behind these numbers and to understand the importance of risk management 90% is a win rate no one can achieve but even 60% most Traders get a false sense of security and confidence
+- thinking that just because they win more trades than they lose then the chances of them encountering a really bad losing streak are so unlikely that they don't plan for it they don't expect it uh and this can be a lot of
+- Traders undoing so I have a spreadsheet here uh there'll be a link to this Below in the video description using uh the core probability Theory mathematics we have a sample size of a th000 trades here and this table here
+- represents the maximum theoretical losing streak over the sample size here's the formula for how I'm calculating this table again I got this formula from Nick Raj and it's based on probabilistic Theory so this formula is
+- good at estimating losing streaks over large sample sizes it really just gives
+
+8. [14:01 - 16:03]
+- us a ballpark figure a realistic reasonable estimation of the kind of losing streak we can expect to experience with that win rate at some point I also have this expectancy spreadsheet which I'll explain more about later
+- I've inverted my screen here to keep this dark because the presentation is dark but if you make a copy of this spreadsheet there'll be a link below you can play around with these numbers up here and see how different
+- risk reward ratios and win rates and risk per trade affect your Edge and money management outcomes the lower the sample size the lower the chance of the losing streak because we have such a small sample size that the
+- chances of a bad losing streak occurring are reduced but if we have a th000 or more even with a 90% win rate we could lose three trades in a row over a th000 trades if we go up to a million trades now that number jumps
+- up to six so you can see to get this to be 100 I don't know what number we would have to put in here but it would be pretty big so the chances are minimal but they're not zero and so with a th000 trade sample size and a
+- 60% win rate you can expect at some point to lose eight trades in a row that is not an unreasonable expectation that is within the Realms of reasonable probability and so be prepared for that if you're risking 2 or 3%
+- per trade can you stomach losing 16% or 30% of your Capital when this losing streak inevitably occurs if you can't then you need to lower that number you need to be a bit more conservative with your risk and if you've
+- only got a 50 50 or 40% win rate and you're risking 2% per trade you are going to encounter a 50% draw down uh before you know it almost certainly so that is the importance of understanding the math behind all of this
+- and structuring your trading and your risk management plans around this knowledge I'll leave a link to this spreadsheet below uh but let's move on there's a few more things I want to cover one of the last things I want
+- to mention here is the theory of
+
+9. [16:01 - 18:03]
+- gamblers fallacy or the Monte Carlo fallacy the gamblers fallacy is the belief that past random events influence the probability of future events and this is simply not true and we'll go over some examples of this before
+- we wrap up the video today uh but for example let's use the roulette example in roulette if the wheel lands on black multiple times in a row some people might believe that red is due and I laugh at that because I know
+- people including my own family that uh have fallen victim to this belief uh in the casino before when I've been there with them and they've thought look how many times blacks came up Reds JW I've given up trying to
+- explain to them that it's not because it's a buzz kill no one wants to hear that when you're at the casino there to have fun and gamble but it's important to understand this especially as a Trader just because you lost
+- 10 trades in a row does not mean that the 11th trade has a higher chance of winning now it is true that the 11th trade might have a very low chance of being a losing TR trade if your win rate is high but that chance is
+- constant and it doesn't change just because you had 10 losing trades in a row prior to that it's important to understand that each event in probability is independent and we'll go over some more examples later but where
+- this term came from the Monte Carlo fallacy the gamblers fallacy came from the Monte Carlo Casino uh this is also the term for Monte Cola simulations I already did a video on that uh so go and check that out if you're
+- interested but back in 19 13 at the Monte Carlo Casino the ru the roulette wheel landed on Black 26 times in a row and gamblers lost Millions betting on red betting against the recent outcomes because they believed that
+- red was due now this was on a single zero European wheel so the odds of black were about 48% the odds of black coming up 26 times in a row with a 48% chance were 0.004% so that's pretty bad luck for the people who kept
+- betting against black
+
+10. [18:00 - 20:03]
+- that's very very bad luck you can't avoid this that's the thing sure it came out 26 times in a row and you didn't know that that was going to continue for 26 spins the odds of that were really really low but the odds
+- were constant each spin had a 48% chance of coming out black and a 26 spin sample size is Tiny if we go back to my spreadsheet for a moment and let's copy this out paste it here and let's change this to 48 48.6 5 so we
+- have a 48.6 5% chance over 1,000 spins it is not unlikely to see red or black come up 10 times in a row and you can imagine at a casino spinning a thousand times they probably do that or more spins a day so people that
+- work at casinos the dealers would see this happen quite frequently or more frequently than the average Gambler so some of you may be asking and I've thought this myself when I learned about this this uh Theory I thought
+- wouldn't it mean if the chances of losing 100 trades in a row are so slim with a 90% win rate and you encountered a 100 Trade losing a row doesn't that by definition mean that you'd be statistically closer to Breaking
+- the streak with a win and the answer is no you wouldn't be this mistaken belief is the gamblers fallacy in a nutshell and it takes a little bit to wrap your head around it but let's break it down in more detail because
+- this is something a lot of Traders really get hung up on and it it leads to really bad habits bad decisions in the market it leads to chasing losses and all sorts of silliness I mean some of you would have heard of the
+- Martingale strategy which dictates that you should increase your risk with each losing trade this is the exact reason why you should not do that that's a bad strategy um sure you might get lucky from time to time but
+- over a large sample of Trades that is a losing strategy and a very dangerous one because the gambles fallacy is the mistaken belief that if something happens more frequently than normal during a given period it will
+- happen less frequently in the future or VI versa so for example if you flip a
+
+11. [20:01 - 22:02]
+- Fair coin and it lands on heads 10 times in a row the fallacy is believing that the next flip is more likely to be tails to balance things out but in reality the coin still has a 50% chance of landing on heads or tails
+- regardless of previous outcomes each bet or event like a coin flip or a roulette spin or a trade for that matter is independent of the previous ones so if you have a 90% chance of winning a bet the outcome of previous
+- bets doesn't change that probability the odds of winning or losing each individual bet remain constant no matter how many times you've won or lost before so how does all this apply to trading here are a few key points
+- First losing streaks are inevitable draw Downs are inevitable accept it embrace the suck don't try to fight it don't try to avoid it there's no way around it when you're dealing with probabilities as we do as Traders you
+- are going to encounter losing streaks no matter how good you are at trading no matter how often you win and that is why risk management is key to successful trading no matter how good you get at trading there is always
+- the danger that the next trade will be a loss or the next 10 trades will be losers and if you don't manage your risk properly you are going to blow up understanding all of this will motivate you to be a better risk
+- manager which will in turn make you a more profitable Trader over the long run it also should encourage you to stick to your plan because you don't know what the next trade will be regardless of recent trade outc S I
+- know it's tempting to think you do but you don't you really don't the markets don't care what your last trad's outcome was that's the best thing about trading it's not personal the markets are not personal they don't
+- care about your situation and they don't care about your financial situation that's why it can ruin you and that's also why it can make you rich it does not discriminate the only discriminating factor is the money you
+- have at risk leverage things like that it doesn't care if you're poor it doesn't care if you're rich it doesn't care if you can afford to lose the next trade or not it just doesn't
+
+12. [22:00 - 24:02]
+- care it's going to keep going on keep randomly moving as it does over time and now sure the markets aren't entirely random or else we wouldn't be able to develop an edge over them as Traders but there are so many factors
+- influencing a Market's movement that just because we can exploit its movement using trading edges and trading systems doesn't mean we can guess accurately what the market will do next so in other words we need to avoid
+- emotional trading you are not due for a win and likewise you are not due for a loss just because you've had a bunch of winning trades in a row doesn't mean the next trade is going to be more likely to lose that's why I'm
+- such a big fan of systematic trading I like systems where I just press the buttons and the system does the work because whenever I get involved with discretionary trading especially back in the day when I traded crypto
+- during the 2017 bull market and the most recent 2020 bll Market uh emotions really played a part in my decision- making there were many times where I thought I need to take profit because this is this can't go up anymore
+- and it would go up another 50% overnight and then there were times towards the end where I thought wow this has gone up so much it's probably going to continue going up I should keep my positions on and I end up losing
+- you know 20% of my open profit or more in some cases that's because of my emotional uh decision- making and things like gambler's fallacy creeping into my thought process so we need to understand probability Theory even
+- a high win rate will will encounter losing streaks be prepared for it understanding all of this can help you to know and trust your Edge if you don't understand and trust your Edge you won't be able to execute it
+- consistently and you will not find consistent profits as a Trader yes oh there you go so you double your money yeah let's going to charity
+
+13. [24:07 - 26:03]
+- nice so in summary each trade we take is independent of any previous trades short-term outcomes are random so expect pain expect draw downs and don't try to avoid them instead plan for them mitigate them manage your risk
+- keep your risk constrained in the context of your system so depends on your win rate depends on your risk reward profile on average we don't always know these numbers um statically but we need to have a good
+- understanding of what to expect over a large sample size so we need to be thinking in terms of blocks of 100 trades at least 100 trades if not more think of the next thousand trades what is likely to happen over the next
+- thousand trades and a lot of this information we're not going to be able to know unless we back test and that's something I'll go into more detail in future videos and put together a whole course on when I get time at
+- least for um trading View and the strategy tester uh which is a complex Beast to wrap your head around um but through the process of sound back testing techniques Monte Carlo simulation which we'll get through later and
+- I've done a video on that previously and just developing robust systems that can withstand losing streaks which can withstand the randomness of markets that is how we deal with draw downs we don't try to avoid them
+- that's a losing game and it leads to bad habits bad decision-making bad trading psychology uh all kinds of dangerous pitfalls so accept draw downs and understand your Edge intimately that is key to good trading
+- understanding these numbers and how they affect your Edge over the markets is really important to having confidence in the system and being able to execute it consistently most Traders fail because either they do not
+- have an edge over the markets or they have an edge that works but they don't understand it well enough to have confidence in it to trust it and to withstand those losing streaks that inevitably come along any of us who
+- have been trading for any length of time all
+
+14. [26:01 - 28:03]
+- know traders who system hop hop from system to system they encounter a losing streak and they think oh the system system doesn't work or it's not as good as I expected and they move on to the next system when that system
+- could have been profitable consistency is key in trading and sticking to a consistent plan is the only way to measure your results and improve them so take the time to back test and uh develop a system that you
+- understand and respect and trust and then stick to that plan for some period of time at least 100 trades personally when I was learning I stuck to at least 100 trades and then I would do it quarterly I would say for this
+- next next quarter I'm going to follow my plan note fornote without deviation and see what happens and then if it doesn't work after that quarter uh then I'll readjust I'll reassess but I made money in that quarter and
+- I've made money most quarters ever since now I have a losing quarter here or there but over the long term uh I generally make money because I understand my Edge I understand these numbers now and I have good trading
+- psychology as a result so check out my previous video on Monte Carlo simulations in trading view if you're curious about that um check out the spreadsheets below um now on that note let me show you the second tab to this
+- uh spreadsheet the expectancy tab this is where you can input an account balance a win rate a risk reward profile and a risk per trade and these numbers here are a simulated return based on these numbers now the trade
+- count is inaccurate I need to fix that formula um but right now we have 100 trades being simulated we can have up to 1,000 so if I put in 1,000 here we have a list of Trades that are randomly generated based on our win
+- percentage and our risk reward profile and over here are our stats so over 1,000 trades with a 50% win rate 2:1 risk reward with 2% risk we had a 20% draw down and an astronomical return because of compounding so let's
+- stick to trades for now 143% return this
+
+15. [28:01 - 30:01]
+- just goes to show a lot of Traders don't understand 2:1 is not a unreasonable risk reward to shoot for a 50% win rate with 2:1 is very high um and 2% risk is very high now over a small sample size you're not going to get
+- astronomical draw downs but if we bump this up to a th000 keep an eye on my draw down here it will not be unreasonable to see 30% plus draw Downs over 1,000 sample size with these metrics now this is a really really good
+- system most 2:1 systems will hover around a 40% uh win rate at best and you can see here the minimum win rate required with these metrics is 33% if we fall below this win rate with a 2 to1 risk reward we are not going to
+- be profitable we need at least 33% to break even again this doesn't factor in commission cost slippage tax all the hidden cost of trading um this is just a raw numbers so these numbers would be worse in real trading so
+- keep keep that in mind and as you can see it's not hard to get a nasty draw down with a 2 to1 risk reward and a 40% win rate we already lost half our Capital with just one of these simulated samples over a th000 trades
+- and that's with a pretty solid win rate quite high above our minimum win rate so what does that tell me that tells me that 2% risk is too much I'm not comfortable risking that much because at some point I am going to
+- encounter a 40 plus per draw down with a two to1 risk reward so I need to drop this down to 1% uh 1% would probably be acceptable for me I don't think we're going to counter a draw down above 30% with a 1% Risk 2 to1 40%
+- win rate these are the sort of metrics I try to shoot for my trading they are reasonable they are realistically achievable in a trading system so these are the kind of realistic numbers I'm looking for and playing around
+- with a spreadsheet like this can help you wrap your head around the math wrap your head around uh what to expect with with these numbers and the theory behind all of this again this is all just theory in live markets
+
+16. [30:00 - 32:02]
+- things will be a little bit different um but anyway if you want to play around with the spreadsheet you can come to the link in the video description click file and click make a copy uh don't request to edit the
+- spreadsheet because I won't allow you to because if people screw it up other people can't use it so make a clone of this spreadsheet make a copy and then you can do whatever you want with it uh finally check out my pin
+- script Master course if you're new to pinescript or trading View and you want to learn how to make your own scripts for that platform um I've got more content my YouTube channel so go and uh do a deep dive on that if
+- you're curious uh finally just believe in yourself do the work and be the casino not the sucker Don't Be The Gambler be the house Edge uh and you will find success as a Trader eventually I don't know what that will look
+- like for you but I've done it all my trading mentors have done it a few of my friends who are Traders have done it uh it can be done but it does take hard work it takes understanding this Theory it takes good Trading
+- psychology good habits uh consistency experience education teaching yourself these things learning the ropes properly um and instilling good habits it's not easy but it can be done and finally the profits from that
+- roulette spin are going to go to Traders for a cause so that's I've never donated to these guys before but I've done a bit of research on them they seem like a good um Community Good Charity I was going to donate this to
+- something else but I thought since this is a trading video I should probably just donate it to a trading charity and this is the best one I could find so that's where the money will be going hopefully it will help some
+- people out it was pure luck to win that obviously so it's not money I feel I earned so I should send it off to charity that's all I have to say hope you guys found this video interesting if you did leave a comment below
+- let me know what you think let me know if you want more videos like this or if you just found a boring and you're not interested in this stuff at all then I don't know I'll show you something else I guess but this is
+- important this is the theory behind good trading if you found this boring and you're not
+
+17. [32:00 - 32:19]
+- interested in this stuff uh then you're probably not going to make it as a Trader unfortunately and you should probably find something else to do with your time and your money quite frankly uh but anyway with that said
+- I'll wrap this up here best of luck with your trading and everything else you're up to I love you guys take care and I'll speak with you soon goodbye
+

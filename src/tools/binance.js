@@ -51,6 +51,33 @@ export function registerBinanceTools(server) {
     market, account,
   }, wrap(core.getRiskReport));
 
+  // ---- Trade-math planners (pure, no network, no account) ----
+  server.tool('binance_calc_expectancy', 'Forward-looking expectancy from a win rate (%) and reward:risk ratio: expectancy in R (per unit risked), the break-even win rate (1/(1+rr), e.g. 33% for 2:1), and — if a risk budget is given — $/% per trade and the projected PnL over N trades (fixed-risk). Theory only: excludes commission/slippage/tax/compounding. Pure calc.', {
+    winRate: z.coerce.number().describe('Win rate as a percent (e.g. 50 = 50%)'),
+    rrRatio: z.coerce.number().describe('Reward:risk ratio — reward won per 1 unit risked (e.g. 2 = 2:1)'),
+    riskPct: z.coerce.number().optional().describe('Risk per trade as % of account (for the %-per-trade projection)'),
+    riskAmount: z.coerce.number().optional().describe('Risk per trade in quote currency ($) (for the $-per-trade projection)'),
+    balance: z.coerce.number().optional().describe('Account balance, to turn riskPct into a $ figure'),
+    trades: z.coerce.number().default(100).describe('Sample size for the PnL projection (default 100)'),
+  }, wrap(core.calcExpectancy));
+
+  server.tool('binance_estimate_losing_streak', 'Estimate the longest losing streak to expect over a sample size for a given win rate (probabilistic ln(N)/ln(1/lossRate) — e.g. 90% win rate still loses ~3 in a row over 1000 trades, 60% loses ~8). Returns a table across sample sizes; if riskPct is given, the drawdown that streak implies. Plan risk-% around this. Pure calc.', {
+    winRate: z.coerce.number().describe('Win rate as a percent, strictly 0–100'),
+    sampleSize: z.coerce.number().default(1000).describe('Number of trades to plan over (default 1000)'),
+    riskPct: z.coerce.number().optional().describe('Risk per trade as % — adds the worst-streak drawdown (fixed + compounded)'),
+  }, wrap(core.estimateLosingStreak));
+
+  server.tool('binance_simulate_equity', 'Monte Carlo equity simulation: runs many random trade sequences at a win rate + reward:risk, risking riskPct each (compounding by default), and reports final-return percentiles, max-drawdown percentiles, longest losing streak, % of runs profitable and % that hit ruin. The forward-looking "what risk-% can I survive?" tool. Pure calc (no network).', {
+    winRate: z.coerce.number().describe('Win rate as a percent 0–100'),
+    rrRatio: z.coerce.number().describe('Reward:risk ratio (e.g. 2 = 2:1)'),
+    riskPct: z.coerce.number().default(1).describe('Risk per trade as % of balance (default 1)'),
+    startBalance: z.coerce.number().default(10000).describe('Starting balance (default 10000)'),
+    trades: z.coerce.number().default(1000).describe('Trades per run (default 1000, max 100000)'),
+    runs: z.coerce.number().default(1000).describe('Independent runs to simulate (default 1000, max 10000)'),
+    compounding: z.boolean().default(true).describe('Risk a % of current balance (true) vs fixed % of starting balance (false)'),
+    ruinDrawdownPct: z.coerce.number().default(50).describe('Drawdown % that counts a run as "ruined" (default 50)'),
+  }, wrap(core.simulateEquity));
+
   server.tool('binance_get_open_orders', 'List open orders, optionally filtered by symbol', {
     market, symbol: symbol.optional(), account,
   }, wrap(core.getOpenOrders));
