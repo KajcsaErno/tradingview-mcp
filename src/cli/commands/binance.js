@@ -527,6 +527,59 @@ register('binance', {
         durationSec: o.durationSec !== undefined ? Number(o.durationSec) : undefined,
       }),
     }],
+    ['watch-flow', {
+      description: 'Watch real-time order flow for a bounded window and summarize aggressive buy/sell delta, top-of-book spread, and depth imbalance (Binance-native heatmap proxy).',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        durationSec: { type: 'string', short: 'd', description: 'Seconds to watch (1-60, default 10)' },
+        levels: { type: 'string', short: 'l', description: 'Depth levels to track (5, 10, or 20; defaults to 20)' },
+      },
+      handler: (o) => core.watchOrderFlow({
+        market: o.market || 'futures', symbol: o.symbol,
+        durationSec: o.durationSec !== undefined ? Number(o.durationSec) : undefined,
+        levels: o.levels !== undefined ? Number(o.levels) : undefined,
+      }),
+    }],
+    ['footprint', {
+      description: 'Footprint-style per-candle aggression from Binance klines (taker buy vs sell quote flow, delta, flow tags).',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        interval: { type: 'string', short: 'i', description: '1m,5m,15m,1h,… (default 1m)' },
+        limit: { type: 'string', short: 'n', description: 'Bars to analyze (default 100, max 500)' },
+      },
+      handler: (o) => core.getFootprintBars({
+        market: o.market || 'futures', symbol: o.symbol,
+        interval: o.interval || '1m',
+        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+      }),
+    }],
+    ['vol-regime', {
+      description: 'Realized volatility regime + downside/upside skew proxy across multiple timeframes (default 5m/15m/1h/4h).',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        intervals: { type: 'string', short: 'i', description: 'CSV intervals, e.g. "5m,15m,1h,4h"' },
+        limit: { type: 'string', short: 'n', description: 'Bars per interval (default 300, min 30, max 1500)' },
+      },
+      handler: (o) => core.getVolatilityRegime({
+        market: o.market || 'futures', symbol: o.symbol,
+        intervals: o.intervals ? String(o.intervals).split(',').map((x) => x.trim()).filter(Boolean) : undefined,
+        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+      }),
+    }],
+    ['options-surface', {
+      description: 'Binance Options implied-volatility surface + ATM call/put skew (public EAPI). Complements vol-regime with options-implied data.',
+      options: {
+        underlying: { type: 'string', short: 'u', description: 'Underlying pair, e.g. BTCUSDT (default BTCUSDT)' },
+        expirations: { type: 'string', short: 'e', description: 'CSV expiry filter in YYYYMMDD, e.g. "20260626,20260925"' },
+      },
+      handler: (o) => core.getOptionsSurface({
+        underlying: o.underlying || 'BTCUSDT',
+        expirations: o.expirations ? String(o.expirations).split(',').map((x) => x.trim()).filter(Boolean) : undefined,
+      }),
+    }],
     ['klines', {
       description: 'Candlesticks (OHLCV) for a symbol (public) — for the exact Binance contract, no chart needed',
       options: {
