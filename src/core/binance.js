@@ -1278,6 +1278,377 @@ export async function watchPrice({ market = 'futures', symbol, durationSec = 10,
   });
 }
 
+// Supported partial-book depth sizes on Binance streams.
+const ORDER_FLOW_DEPTH_LEVELS = [5, 10, 20];
+
+/** Watch real-time order flow over a bounded window and return a compact microstructure read:
+ *  aggressive buy/sell delta from aggTrades, top-of-book spread, and depth imbalance from a
+ *  partial depth stream. This is the nearest Binance-native analog to a lightweight heatmap read.
+ *  `durationSec` clamps to [1,60]. `levels` snaps to one of 5/10/20 (Binance stream limits). */
+export async function watchOrderFlow({ market = 'futures', symbol, durationSec = 10, levels = 20, _deps = {} } = {}) {
+  if (!symbol) throw new Error('symbol is required');
+  const sym = String(symbol).toUpperCase();
+  const dur = Math.max(1, Math.min(Number(durationSec) || 10, 60));
+  const lvNum = requireFinite(levels, 'levels');
+  const lv = ORDER_FLOW_DEPTH_LEVELS.includes(lvNum)
+    ? lvNum
+    : (lvNum <= 5 ? 5 : lvNum <= 10 ? 10 : 20);
+  const base = WS_BASES[resolveMarket(market, _deps)];
+  if (!base) throw new Error(`unknown market ${market}`);
+  const WS = _deps.WebSocket || (typeof WebSocket !== 'undefined' ? WebSocket : null);
+  if (!WS) throw new Error('WebSocket is not available in this runtime');
+  const setTimer = _deps.setTimeout || setTimeout;
+  const clearTimer = _deps.clearTimeout || clearTimeout;
+  const s = sym.toLowerCase();
+  const wsUrl = `${base}/stream?streams=${s}@aggTrade/${s}@depth${lv}@100ms/${s}@bookTicker`;
+
+  return new Promise((resolve, reject) => {
+    let settled = false, timer = null, ws;
+    const agg = { count: 0, buyQty: 0, sellQty: 0, buyNotional: 0, sellNotional: 0, firstTradeTime: undefined, lastTradeTime: undefined };
+    let top = { bid: undefined, ask: undefined, bidQty: undefined, askQty: undefined, time: undefined };
+    let depth = { bids: [], asks: [], time: undefined };
+
+    const toLevels = (rows = []) => rows
+      .map(([p, q]) => ({ price: Number(p), qty: Number(q) }))
+      .filter((x) => Number.isFinite(x.price) && Number.isFinite(x.qty) && x.qty > 0)
+      .slice(0, lv);
+
+    const summarize = () => {
+      const totalQty = agg.buyQty + agg.sellQty;
+      const deltaQty = agg.buyQty - agg.sellQty;
+      const totalNotional = agg.buyNotional + agg.sellNotional;
+      const deltaNotional = agg.buyNotional - agg.sellNotional;
+
+      const bid = Number.isFinite(top.bid) ? top.bid : (depth.bids[0]?.price);
+      const ask = Number.isFinite(top.ask) ? top.ask : (depth.asks[0]?.price);
+      const spread = Number.isFinite(bid) && Number.isFinite(ask) ? ask - bid : undefined;
+
+      const bidNotional = depth.bids.reduce((s0, x) => s0 + (x.price * x.qty), 0);
+      const askNotional = depth.asks.reduce((s0, x) => s0 + (x.price * x.qty), 0);
+      const depthSum = bidNotional + askNotional;
+      const imbalance = depthSum > 0 ? (bidNotional - askNotional) / depthSum : undefined;
+      const largestBidWall = depth.bids.reduce((best, x) => (x.qty > (best?.qty || 0) ? x : best), null);
+      const largestAskWall = depth.asks.reduce((best, x) => (x.qty > (best?.qty || 0) ? x : best), null);
+
+      return {
+        success: true, market, symbol: sym, durationSec: dur, levels: lv,
+        tradeTicks: agg.count,
+        aggressiveBuyQty: Number(agg.buyQty.toFixed(8)),
+        aggressiveSellQty: Number(agg.sellQty.toFixed(8)),
+        deltaQty: Number(deltaQty.toFixed(8)),
+        deltaQtyPct: totalQty > 0 ? `${((deltaQty / totalQty) * 100).toFixed(2)}%` : undefined,
+        aggressiveBuyNotional: Number(agg.buyNotional.toFixed(2)),
+        aggressiveSellNotional: Number(agg.sellNotional.toFixed(2)),
+        deltaNotional: Number(deltaNotional.toFixed(2)),
+        vwap: totalQty > 0 ? Number((totalNotional / totalQty).toFixed(8)) : undefined,
+        topOfBook: {
+          bid: Number.isFinite(bid) ? bid : undefined,
+          ask: Number.isFinite(ask) ? ask : undefined,
+          spread: Number.isFinite(spread) ? Number(spread.toFixed(8)) : undefined,
+          spreadBps: Number.isFinite(spread) && bid ? Number(((spread / bid) * 10000).toFixed(2)) : undefined,
+          bidQty: Number.isFinite(top.bidQty) ? top.bidQty : undefined,
+          askQty: Number.isFinite(top.askQty) ? top.askQty : undefined,
+        },
+        depthImbalance: {
+          bidNotional: Number(bidNotional.toFixed(2)),
+          askNotional: Number(askNotional.toFixed(2)),
+          imbalance: imbalance != null ? Number(imbalance.toFixed(4)) : undefined,
+          imbalancePct: imbalance != null ? `${(imbalance * 100).toFixed(2)}%` : undefined,
+          largestBidWall,
+          largestAskWall,
+        },
+        firstTradeTime: agg.firstTradeTime,
+        lastTradeTime: agg.lastTradeTime,
+        note: agg.count === 0 && depth.bids.length === 0 && depth.asks.length === 0
+          ? 'No trade/depth events observed in the window (illiquid pair, wrong symbol/market, or window too short).'
+          : undefined,
+      };
+    };
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimer(timer);
+      try { ws && ws.close(); } catch { /* ignore */ }
+      if (err) reject(err); else resolve(summarize());
+    };
+
+    try { ws = new WS(wsUrl); } catch (e) { return finish(e); }
+    timer = setTimer(() => finish(), dur * 1000);
+    ws.addEventListener('message', (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      const d = m?.data || m || {};
+      if (d.e === 'aggTrade') {
+        const price = Number(d.p), qty = Number(d.q);
+        if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
+        const notional = price * qty;
+        const sellAggressor = !!d.m; // buyer is maker => seller was aggressive
+        if (sellAggressor) {
+          agg.sellQty += qty;
+          agg.sellNotional += notional;
+        } else {
+          agg.buyQty += qty;
+          agg.buyNotional += notional;
+        }
+        agg.count += 1;
+        if (agg.firstTradeTime == null) agg.firstTradeTime = d.T;
+        agg.lastTradeTime = d.T;
+        return;
+      }
+      if (d.e === 'depthUpdate' || (Array.isArray(d.b) && Array.isArray(d.a))) {
+        depth = { bids: toLevels(d.b), asks: toLevels(d.a), time: d.E || d.T };
+        return;
+      }
+      if (d.e === 'bookTicker' || (d.b !== undefined && d.a !== undefined && d.s)) {
+        top = {
+          bid: Number(d.b), ask: Number(d.a),
+          bidQty: Number(d.B), askQty: Number(d.A),
+          time: d.E || d.T,
+        };
+      }
+    });
+    ws.addEventListener('error', () => { /* a close event follows; summarize there */ });
+    ws.addEventListener('close', () => finish());
+  });
+}
+
+/** Footprint-style per-candle aggression read from Binance kline order-flow fields. Each bar
+ *  estimates aggressive buy/sell quote flow using takerBuyQuoteVolume vs total quoteVolume. */
+export async function getFootprintBars({ market = 'futures', symbol, interval = '1m', limit = 100, _deps = {} } = {}) {
+  const lim = Math.max(1, Math.min(Math.trunc(requireFinite(limit, 'limit')), 500));
+  const k = await getKlines({ market, symbol, interval, limit: lim, extended: true, _deps });
+  const bars = (k.candles || []).map((c) => {
+    const quoteVolume = Number(c.quoteVolume) || 0;
+    const buyQuote = Number(c.takerBuyQuoteVolume) || 0;
+    const sellQuote = Math.max(quoteVolume - buyQuote, 0);
+    const delta = buyQuote - sellQuote;
+    const buyShare = quoteVolume > 0 ? (buyQuote / quoteVolume) : null;
+    const sellShare = quoteVolume > 0 ? (sellQuote / quoteVolume) : null;
+    return {
+      openTime: c.openTime,
+      closeTime: c.closeTime,
+      open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close),
+      trades: Number(c.trades) || 0,
+      quoteVolume: Number(quoteVolume.toFixed(2)),
+      aggressiveBuyQuote: Number(buyQuote.toFixed(2)),
+      aggressiveSellQuote: Number(sellQuote.toFixed(2)),
+      deltaQuote: Number(delta.toFixed(2)),
+      buyShare: buyShare != null ? Number((buyShare * 100).toFixed(2)) : undefined,
+      sellShare: sellShare != null ? Number((sellShare * 100).toFixed(2)) : undefined,
+      flowTag: buyShare == null ? 'no_flow' : buyShare >= 0.55 ? 'buyers_in_control' : buyShare <= 0.45 ? 'sellers_in_control' : 'balanced',
+    };
+  });
+  const totalBuy = bars.reduce((s0, b) => s0 + b.aggressiveBuyQuote, 0);
+  const totalSell = bars.reduce((s0, b) => s0 + b.aggressiveSellQuote, 0);
+  const total = totalBuy + totalSell;
+  return {
+    success: true, market, symbol: k.symbol, interval: k.interval,
+    count: bars.length,
+    totals: {
+      aggressiveBuyQuote: Number(totalBuy.toFixed(2)),
+      aggressiveSellQuote: Number(totalSell.toFixed(2)),
+      deltaQuote: Number((totalBuy - totalSell).toFixed(2)),
+      buyShare: total > 0 ? Number(((totalBuy / total) * 100).toFixed(2)) : undefined,
+    },
+    bars,
+  };
+}
+
+/** Multi-timeframe realized-volatility + downside/upside skew proxy from klines. This is not
+ *  options-implied vol, but provides a real-time tradable volatility regime read directly from
+ *  Binance market data. */
+export async function getVolatilityRegime({ market = 'futures', symbol, intervals = ['5m', '15m', '1h', '4h'], limit = 300, _deps = {} } = {}) {
+  if (!symbol) throw new Error('symbol is required');
+  const lim = Math.max(30, Math.min(Math.trunc(requireFinite(limit, 'limit')), 1500));
+  const list = Array.isArray(intervals)
+    ? intervals
+    : String(intervals || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const ivs = [...new Set((list.length ? list : ['5m', '15m', '1h', '4h']).map((x) => String(x)))];
+  for (const iv of ivs) if (!KLINE_INTERVALS.includes(iv)) throw new Error(`interval must be one of: ${KLINE_INTERVALS.join(', ')}`);
+
+  const surface = [];
+  for (const iv of ivs) {
+    const r = await getKlines({ market, symbol, interval: iv, limit: lim, _deps });
+    const { highs, lows, closes } = ohlcvFull(r.candles || []);
+    const rets = [];
+    for (let i = 1; i < closes.length; i++) {
+      if (closes[i - 1] > 0 && closes[i] > 0) rets.push(Math.log(closes[i] / closes[i - 1]));
+    }
+    const up = rets.filter((x) => x > 0);
+    const down = rets.filter((x) => x < 0).map((x) => Math.abs(x));
+    const sd = stddev(rets);
+    const upSd = stddev(up);
+    const downSd = stddev(down);
+    const bpy = INTERVAL_MS[iv] ? (365.25 * 864e5) / INTERVAL_MS[iv] : null;
+    const rv = (sd != null && bpy) ? sd * Math.sqrt(bpy) * 100 : null;
+    const upRv = (upSd != null && bpy) ? upSd * Math.sqrt(bpy) * 100 : null;
+    const downRv = (downSd != null && bpy) ? downSd * Math.sqrt(bpy) * 100 : null;
+    let park = null;
+    if (highs.length > 1 && lows.length > 1 && bpy) {
+      let sum = 0, n = 0;
+      for (let i = 0; i < highs.length; i++) {
+        if (highs[i] > 0 && lows[i] > 0) {
+          sum += Math.log(highs[i] / lows[i]) ** 2;
+          n += 1;
+        }
+      }
+      if (n > 1) park = Math.sqrt((1 / (4 * n * Math.log(2))) * sum) * Math.sqrt(bpy) * 100;
+    }
+    const atr14 = atr(highs, lows, closes, 14);
+    const last = closes.length ? closes[closes.length - 1] : null;
+    surface.push({
+      interval: iv,
+      bars: closes.length,
+      realizedVolPct: rv != null ? Number(rv.toFixed(2)) : null,
+      downsideVolPct: downRv != null ? Number(downRv.toFixed(2)) : null,
+      upsideVolPct: upRv != null ? Number(upRv.toFixed(2)) : null,
+      downsideUpsideRatio: (downRv != null && upRv && upRv > 0) ? Number((downRv / upRv).toFixed(3)) : null,
+      parkinsonVolPct: park != null ? Number(park.toFixed(2)) : null,
+      atrPct: (atr14 != null && last) ? Number(((atr14 / last) * 100).toFixed(2)) : null,
+    });
+  }
+
+  const sorted = [...surface].sort((a, b) => (INTERVAL_MS[a.interval] || 0) - (INTERVAL_MS[b.interval] || 0));
+  const first = sorted.find((x) => x.realizedVolPct != null);
+  const last = [...sorted].reverse().find((x) => x.realizedVolPct != null);
+  const slope = first && last ? Number((last.realizedVolPct - first.realizedVolPct).toFixed(2)) : null;
+  const anchor = surface.find((x) => x.interval === '1h') || surface[0];
+  const rv = anchor?.realizedVolPct;
+  const regime = rv == null ? 'insufficient_data' : rv >= 90 ? 'extreme' : rv >= 60 ? 'high' : rv >= 30 ? 'moderate' : 'low';
+  const skew = anchor?.downsideUpsideRatio;
+  const skewTag = skew == null ? 'unknown' : skew >= 1.2 ? 'left_tail_heavy' : skew <= 0.85 ? 'right_tail_heavy' : 'balanced';
+
+  return {
+    success: true, market, symbol: String(symbol).toUpperCase(),
+    intervals: ivs,
+    limit: lim,
+    regime,
+    skewTag,
+    termStructureSlope: slope,
+    surface,
+    note: 'Realized-volatility model from trades/klines (not options-implied volatility).',
+  };
+}
+
+const OPTIONS_BASE = 'https://eapi.binance.com';
+
+/** Public request helper for Binance Options (EAPI) endpoints. */
+async function optionsPublicRequest({ endpoint, params = {}, _deps = {} } = {}) {
+  const fetchFn = _deps.fetch || fetch;
+  const query = new URLSearchParams(params).toString();
+  const url = `${OPTIONS_BASE}${endpoint}${query ? `?${query}` : ''}`;
+  const res = await fetchFn(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Binance options ${res.status}: ${data?.msg || JSON.stringify(data)}`);
+  return data;
+}
+
+const toExpCode = (ms) => {
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return undefined;
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+};
+
+/**
+ * Options IV/skew snapshot (public): builds an implied-vol surface from Binance Options mark data,
+ * then reports per-expiry term structure and simple call-vs-put skew around ATM.
+ */
+export async function getOptionsSurface({ underlying = 'BTCUSDT', expirations, _deps = {} } = {}) {
+  const u = String(underlying || '').trim().toUpperCase();
+  if (!u) throw new Error('underlying is required (e.g. BTCUSDT)');
+  const expFilter = new Set(
+    (Array.isArray(expirations) ? expirations : (typeof expirations === 'string' ? expirations.split(',') : []))
+      .map((x) => String(x).trim())
+      .filter(Boolean),
+  );
+
+  const [info, marks, idx] = await Promise.all([
+    optionsPublicRequest({ endpoint: '/eapi/v1/exchangeInfo', _deps }),
+    optionsPublicRequest({ endpoint: '/eapi/v1/mark', params: { underlying: u }, _deps }),
+    optionsPublicRequest({ endpoint: '/eapi/v1/index', params: { underlying: u }, _deps }).catch(() => null),
+  ]);
+
+  const indexPrice = Number(idx?.indexPrice);
+  const symbols = (info?.optionSymbols || []).filter((s) => String(s.underlying || '').toUpperCase() === u);
+  const markBySymbol = new Map((Array.isArray(marks) ? marks : []).map((m) => [String(m.symbol), m]));
+
+  const rows = [];
+  for (const s of symbols) {
+    const expiry = toExpCode(s.expiryDate);
+    if (expFilter.size && !expFilter.has(expiry)) continue;
+    const m = markBySymbol.get(String(s.symbol));
+    if (!m) continue;
+    rows.push({
+      symbol: String(s.symbol),
+      expiry,
+      strike: Number(s.strikePrice),
+      side: String(s.side || '').toUpperCase(),
+      markIV: Number(m.markIV),
+      bidIV: Number(m.bidIV),
+      askIV: Number(m.askIV),
+      delta: Number(m.delta),
+      gamma: Number(m.gamma),
+      theta: Number(m.theta),
+      vega: Number(m.vega),
+      markPrice: Number(m.markPrice),
+    });
+  }
+
+  const byExpiry = new Map();
+  for (const r of rows) {
+    if (!Number.isFinite(r.markIV)) continue;
+    const k = r.expiry || 'unknown';
+    const g = byExpiry.get(k) || { ivs: [], strikes: new Map() };
+    g.ivs.push(r.markIV);
+    const pair = g.strikes.get(r.strike) || {};
+    pair[r.side] = r;
+    g.strikes.set(r.strike, pair);
+    byExpiry.set(k, g);
+  }
+
+  const expiries = [];
+  for (const [expiry, g] of [...byExpiry.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
+    const avgIv = g.ivs.length ? (g.ivs.reduce((s0, x) => s0 + x, 0) / g.ivs.length) : null;
+    let atm = null;
+    if (Number.isFinite(indexPrice) && g.strikes.size) {
+      const bestStrike = [...g.strikes.keys()].reduce((best, st) => (
+        best == null || Math.abs(st - indexPrice) < Math.abs(best - indexPrice) ? st : best
+      ), null);
+      const p = g.strikes.get(bestStrike) || {};
+      if (p.CALL || p.PUT) {
+        const callIv = Number.isFinite(p.CALL?.markIV) ? p.CALL.markIV : null;
+        const putIv = Number.isFinite(p.PUT?.markIV) ? p.PUT.markIV : null;
+        atm = {
+          strike: bestStrike,
+          callIv,
+          putIv,
+          callPutSkew: (callIv != null && putIv != null) ? Number((callIv - putIv).toFixed(6)) : null,
+        };
+      }
+    }
+    expiries.push({
+      expiry,
+      contracts: g.ivs.length,
+      avgMarkIv: avgIv != null ? Number(avgIv.toFixed(6)) : null,
+      atm,
+    });
+  }
+
+  return {
+    success: true,
+    underlying: u,
+    indexPrice: Number.isFinite(indexPrice) ? indexPrice : undefined,
+    expirationsRequested: expFilter.size ? [...expFilter] : undefined,
+    expiries,
+    contracts: rows.length,
+    surface: rows,
+    note: 'Implied volatility from Binance Options mark data. Skew is a simple ATM call-vs-put snapshot, not a full dealer vol model.',
+  };
+}
+
 // ── Public market-data stream (combined multiplex) ───────────────────────────
 // Continuous PUSH of public market data — the unbounded, multi-symbol/multi-stream-type
 // counterpart to the bounded watchPrice. buildMarketStream() builds the combined-stream URL

@@ -17,7 +17,8 @@ import {
   calcPositionSize, getRiskReport,
   calcExpectancy, estimateLosingStreak, simulateEquity,
   getUiKlines, getTradingDayTicker, startUserStream, keepAliveUserStream, closeUserStream,
-  watchPrice, compareSymbols, buildMarketStream, formatMarketEvent,
+  watchPrice, watchOrderFlow, getFootprintBars, getVolatilityRegime, getOptionsSurface,
+  compareSymbols, buildMarketStream, formatMarketEvent,
   getLiquidationHistory, getDepositHistory, getWithdrawHistory, getDepositAddress,
   getTechnicals, correlateSymbols,
   backtestStrategy, compareStrategies, walkForwardBacktest,
@@ -1369,6 +1370,141 @@ describe('watchPrice', () => {
       watchPrice({ market: 'nope', symbol: 'BTCUSDC', _deps: { WebSocket: cls, ...inertTimers } }),
       /unknown market/,
     );
+  });
+});
+
+describe('watchOrderFlow', () => {
+  it('builds a combined stream URL (aggTrade + depth + bookTicker)', async () => {
+    const { cls, seen } = makeWS({ messages: [{ data: { e: 'aggTrade', p: '1', q: '1', m: false, T: 1 } }] });
+    await watchOrderFlow({ market: 'futures', symbol: 'BTCUSDC', levels: 20, _deps: { WebSocket: cls, ...inertTimers } });
+    assert.equal(seen.url, 'wss://fstream.binance.com/stream?streams=btcusdc@aggTrade/btcusdc@depth20@100ms/btcusdc@bookTicker');
+  });
+
+  it('summarizes aggression delta, spread and depth imbalance', async () => {
+    const { cls } = makeWS({
+      messages: [
+        { data: { e: 'aggTrade', p: '100', q: '2', m: false, T: 10 } },
+        { data: { e: 'aggTrade', p: '101', q: '1', m: true, T: 11 } },
+        { data: { e: 'depthUpdate', b: [['100', '5'], ['99', '2']], a: [['101', '4'], ['102', '3']], E: 12 } },
+        { data: { s: 'BTCUSDC', b: '100', B: '1', a: '101', A: '1', E: 13 } },
+      ],
+    });
+    const r = await watchOrderFlow({ symbol: 'BTCUSDC', _deps: { WebSocket: cls, ...inertTimers } });
+    assert.equal(r.success, true);
+    assert.equal(r.tradeTicks, 2);
+    assert.equal(r.aggressiveBuyQty, 2);
+    assert.equal(r.aggressiveSellQty, 1);
+    assert.equal(r.deltaQty, 1);
+    assert.equal(r.topOfBook.spread, 1);
+    assert.equal(r.topOfBook.spreadBps, 100);
+    assert.equal(r.depthImbalance.bidNotional, 698);
+    assert.equal(r.depthImbalance.askNotional, 710);
+    assert.equal(r.depthImbalance.imbalance, -0.0085);
+  });
+});
+
+describe('getFootprintBars', () => {
+  it('computes per-bar aggressive buy/sell quote flow and totals from extended klines', async () => {
+    const kl = [
+      [1, '100', '110', '95', '105', '10', 2, '1000', 12, '7', '700'],
+      [2, '105', '108', '100', '101', '8', 3, '800', 10, '2', '200'],
+    ];
+    const r = await getFootprintBars({ market: 'futures', symbol: 'BTCUSDC', interval: '1m', _deps: deps({ 'fapi/v1/klines': kl }) });
+    assert.equal(r.success, true);
+    assert.equal(r.count, 2);
+    assert.equal(r.bars[0].aggressiveBuyQuote, 700);
+    assert.equal(r.bars[0].aggressiveSellQuote, 300);
+    assert.equal(r.bars[0].flowTag, 'buyers_in_control');
+    assert.equal(r.bars[1].deltaQuote, -400);
+    assert.equal(r.bars[1].flowTag, 'sellers_in_control');
+    assert.equal(r.totals.deltaQuote, 0);
+    assert.equal(r.totals.buyShare, 50);
+  });
+});
+
+describe('getVolatilityRegime', () => {
+  it('returns a multi-timeframe realized-vol surface with regime and skew tags', async () => {
+    const kl = [];
+    let c = 100;
+    for (let i = 0; i < 80; i++) {
+      const o = c;
+      c = i % 2 === 0 ? c * 1.01 : c * 0.992;
+      const h = Math.max(o, c) * 1.003;
+      const l = Math.min(o, c) * 0.997;
+      kl.push([i, String(o), String(h), String(l), String(c), '10', i + 1, '1000', 20, '6', '600']);
+    }
+    const r = await getVolatilityRegime({
+      market: 'futures', symbol: 'BTCUSDC', intervals: ['1m', '5m'], limit: 80,
+      _deps: deps({ 'fapi/v1/klines': kl }),
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.symbol, 'BTCUSDC');
+    assert.deepEqual(r.intervals, ['1m', '5m']);
+    assert.equal(r.surface.length, 2);
+    assert.ok(r.surface[0].realizedVolPct > 0);
+    assert.ok(['extreme', 'high', 'moderate', 'low', 'insufficient_data'].includes(r.regime));
+    assert.ok(['left_tail_heavy', 'right_tail_heavy', 'balanced', 'unknown'].includes(r.skewTag));
+  });
+});
+
+describe('getOptionsSurface', () => {
+  const optionsDeps = (exchangeInfo, marks, idx) => ({
+    fetch: async (url) => {
+      if (String(url).includes('/eapi/v1/exchangeInfo')) return { ok: true, status: 200, json: async () => exchangeInfo };
+      if (String(url).includes('/eapi/v1/mark')) return { ok: true, status: 200, json: async () => marks };
+      if (String(url).includes('/eapi/v1/index')) return { ok: true, status: 200, json: async () => idx };
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+
+  it('builds an options IV surface and computes ATM call-put skew per expiry', async () => {
+    const exchangeInfo = {
+      optionSymbols: [
+        { symbol: 'BTC-260626-60000-C', underlying: 'BTCUSDT', expiryDate: Date.UTC(2026, 5, 26), strikePrice: '60000', side: 'CALL' },
+        { symbol: 'BTC-260626-60000-P', underlying: 'BTCUSDT', expiryDate: Date.UTC(2026, 5, 26), strikePrice: '60000', side: 'PUT' },
+        { symbol: 'BTC-260926-65000-C', underlying: 'BTCUSDT', expiryDate: Date.UTC(2026, 8, 26), strikePrice: '65000', side: 'CALL' },
+      ],
+    };
+    const marks = [
+      { symbol: 'BTC-260626-60000-C', markIV: '0.55', bidIV: '0.54', askIV: '0.56', delta: '0.52', gamma: '0.01', theta: '-0.02', vega: '0.12', markPrice: '2200' },
+      { symbol: 'BTC-260626-60000-P', markIV: '0.60', bidIV: '0.59', askIV: '0.61', delta: '-0.48', gamma: '0.01', theta: '-0.02', vega: '0.11', markPrice: '2400' },
+      { symbol: 'BTC-260926-65000-C', markIV: '0.50', bidIV: '0.49', askIV: '0.51', delta: '0.35', gamma: '0.008', theta: '-0.015', vega: '0.10', markPrice: '1800' },
+    ];
+    const idx = { indexPrice: '60123.4' };
+    const r = await getOptionsSurface({
+      underlying: 'BTCUSDT',
+      _deps: optionsDeps(exchangeInfo, marks, idx),
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.underlying, 'BTCUSDT');
+    assert.equal(r.contracts, 3);
+    assert.equal(r.expiries.length, 2);
+    assert.equal(r.expiries[0].expiry, '20260626');
+    assert.equal(r.expiries[0].atm.strike, 60000);
+    assert.equal(r.expiries[0].atm.callIv, 0.55);
+    assert.equal(r.expiries[0].atm.putIv, 0.6);
+    assert.equal(r.expiries[0].atm.callPutSkew, -0.05);
+  });
+
+  it('filters requested expirations (YYYYMMDD)', async () => {
+    const exchangeInfo = {
+      optionSymbols: [
+        { symbol: 'BTC-260626-60000-C', underlying: 'BTCUSDT', expiryDate: Date.UTC(2026, 5, 26), strikePrice: '60000', side: 'CALL' },
+        { symbol: 'BTC-260926-60000-C', underlying: 'BTCUSDT', expiryDate: Date.UTC(2026, 8, 26), strikePrice: '60000', side: 'CALL' },
+      ],
+    };
+    const marks = [
+      { symbol: 'BTC-260626-60000-C', markIV: '0.55' },
+      { symbol: 'BTC-260926-60000-C', markIV: '0.50' },
+    ];
+    const r = await getOptionsSurface({
+      underlying: 'BTCUSDT', expirations: ['20260626'],
+      _deps: optionsDeps(exchangeInfo, marks, { indexPrice: '60000' }),
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.contracts, 1);
+    assert.equal(r.expiries.length, 1);
+    assert.equal(r.expiries[0].expiry, '20260626');
   });
 });
 
