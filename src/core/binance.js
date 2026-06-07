@@ -404,6 +404,136 @@ export async function getRiskReport({ market = 'futures', account = '1', _deps =
   };
 }
 
+// ── Trade-math planners (pure, no network) ──────────────────────────────────
+// Forward-looking counterparts to backtestStrategy's backward-looking metrics:
+// the math of expectancy. Given a win rate and reward:risk, what should you
+// expect per trade, what losing streak is coming, and what risk-% keeps the
+// drawdown survivable. (Nick Radge's expectancy/losing-streak framework — the
+// two spreadsheets from the "math of winning" material.) These are theory:
+// fixed-risk, and they exclude commission, slippage and tax, which make real
+// results worse. None of them touch the network or an account.
+
+/** Expectancy from a win rate (%) and reward:risk ratio (rr = reward per 1 risked).
+ *  Returns expectancy in R (per unit risked), the break-even win rate (1/(1+rr)),
+ *  and — if a risk budget is given — $/% per-trade and over-`trades` projections
+ *  (fixed-risk, no compounding). Pure. */
+export function calcExpectancy({ winRate, rrRatio, riskPct, riskAmount, balance, trades = 100 } = {}) {
+  const wr = requireFinite(winRate, 'winRate');
+  const rr = requireFinite(rrRatio, 'rrRatio');
+  if (wr < 0 || wr > 100) throw new Error('winRate is a percent 0–100');
+  if (rr <= 0) throw new Error('rrRatio must be > 0');
+  const p = wr / 100, q = 1 - p;
+  const expectancyR = p * rr - q;                 // win p× of +rr, lose q× of -1, in R units
+  const breakevenWinRate = 100 / (1 + rr);        // win% where expectancyR = 0
+  const n = Math.max(1, Math.floor(requireFinite(trades, 'trades')));
+  const result = {
+    success: true,
+    winRate: wr, rrRatio: rr,
+    expectancyR: Number(expectancyR.toFixed(4)),
+    breakevenWinRatePct: Number(breakevenWinRate.toFixed(2)),
+    edge: expectancyR > 1e-9 ? 'positive' : expectancyR < -1e-9 ? 'negative' : 'breakeven',
+    marginOverBreakevenPct: Number((wr - breakevenWinRate).toFixed(2)),
+    trades: n,
+  };
+  let riskDollars;
+  if (riskAmount != null) riskDollars = requireFinite(riskAmount, 'riskAmount');
+  else if (riskPct != null && balance != null) riskDollars = requireFinite(balance, 'balance') * requireFinite(riskPct, 'riskPct') / 100;
+  if (riskDollars != null) {
+    result.riskPerTrade = Number(riskDollars.toFixed(2));
+    result.expectancyPerTrade = Number((expectancyR * riskDollars).toFixed(2));
+    result.expectedPnlOverTrades = Number((expectancyR * riskDollars * n).toFixed(2)); // fixed-risk
+  }
+  if (riskPct != null) {
+    result.riskPct = requireFinite(riskPct, 'riskPct');
+    result.expectancyPctPerTrade = Number((expectancyR * result.riskPct).toFixed(4));
+  }
+  result.note = 'Theoretical, fixed risk per trade — excludes commission, slippage, tax and compounding (compounding skews returns up, costs skew them down).';
+  return result;
+}
+
+/** Estimate the longest losing streak to expect over a sample size, for a given
+ *  win rate — the probabilistic estimate maxStreak ≈ ln(N)/ln(1/lossRate). Returns
+ *  a table across sample sizes; if riskPct is given, also the drawdown that streak
+ *  implies (fixed and compounded). Pure — an expectation, never a guarantee. */
+export function estimateLosingStreak({ winRate, sampleSize = 1000, riskPct } = {}) {
+  const wr = requireFinite(winRate, 'winRate');
+  if (wr <= 0 || wr >= 100) throw new Error('winRate is a percent strictly between 0 and 100');
+  const q = 1 - wr / 100;                          // loss probability
+  const streakFor = (nn) => Math.max(1, Math.ceil(Math.log(nn) / Math.log(1 / q)));
+  const sizes = [100, 1000, 10000, 100000, 1000000];
+  const n = Math.max(1, Math.floor(requireFinite(sampleSize, 'sampleSize')));
+  const maxLosingStreak = streakFor(n);
+  const result = {
+    success: true,
+    winRate: wr, lossRatePct: Number((q * 100).toFixed(2)), sampleSize: n,
+    maxLosingStreak,
+    table: sizes.map((s) => ({ sampleSize: s, maxLosingStreak: streakFor(s) })),
+    note: "Probabilistic estimate (Nick Radge): the longest run of consecutive losses you can reasonably expect to hit at least once over the sample — a ballpark, not a guarantee. Trades are independent (gambler's fallacy): a losing streak never makes the next trade more likely to win.",
+  };
+  if (riskPct != null) {
+    const r = requireFinite(riskPct, 'riskPct');
+    result.riskPct = r;
+    result.streakDrawdownPctFixed = Number((maxLosingStreak * r).toFixed(2));               // linear, constant $ risk
+    result.streakDrawdownPctCompounded = Number(((1 - Math.pow(1 - r / 100, maxLosingStreak)) * 100).toFixed(2)); // % risk
+  }
+  return result;
+}
+
+/** Monte Carlo equity simulation: run `runs` independent sequences of `trades`
+ *  trades at the given win rate and reward:risk, risking riskPct of balance each
+ *  (compounding by default), and aggregate final return, max drawdown, longest
+ *  losing streak and ruin frequency across runs. The forward-looking "expectancy
+ *  tab" of the framework. RNG is injectable via _deps.rng for deterministic tests.
+ *  Pure (no network). */
+export function simulateEquity({
+  winRate, rrRatio, riskPct = 1, startBalance = 10000,
+  trades = 1000, runs = 1000, compounding = true, ruinDrawdownPct = 50, _deps = {},
+} = {}) {
+  const wr = requireFinite(winRate, 'winRate');
+  const rr = requireFinite(rrRatio, 'rrRatio');
+  const r = requireFinite(riskPct, 'riskPct');
+  if (wr < 0 || wr > 100) throw new Error('winRate is a percent 0–100');
+  if (rr <= 0) throw new Error('rrRatio must be > 0');
+  if (r <= 0) throw new Error('riskPct must be > 0');
+  const startBal = requireFinite(startBalance, 'startBalance');
+  const nTrades = Math.min(Math.max(1, Math.floor(requireFinite(trades, 'trades'))), 100000);
+  const nRuns = Math.min(Math.max(1, Math.floor(requireFinite(runs, 'runs'))), 10000);
+  const ruinDD = requireFinite(ruinDrawdownPct, 'ruinDrawdownPct');
+  const rng = _deps.rng || Math.random;
+  const p = wr / 100;
+  const finals = [], maxDDs = [], streaks = [];
+  let ruined = 0, profitable = 0;
+  for (let run = 0; run < nRuns; run++) {
+    let bal = startBal, peak = startBal, maxDD = 0, streak = 0, worstStreak = 0, hitRuin = false;
+    for (let t = 0; t < nTrades; t++) {
+      const risk = (compounding ? bal : startBal) * (r / 100);
+      const win = rng() < p;
+      bal += win ? risk * rr : -risk;
+      if (win) streak = 0; else { streak += 1; if (streak > worstStreak) worstStreak = streak; }
+      if (bal > peak) peak = bal;
+      const dd = peak > 0 ? (peak - bal) / peak * 100 : 100;
+      if (dd > maxDD) maxDD = dd;
+      if (maxDD >= ruinDD) hitRuin = true;
+      if (bal <= 0) { bal = 0; hitRuin = true; break; }
+    }
+    finals.push(bal); maxDDs.push(maxDD); streaks.push(worstStreak);
+    if (hitRuin) ruined += 1;
+    if (bal > startBal) profitable += 1;
+  }
+  const pctl = (arr, qq) => { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.max(0, Math.round(qq * (s.length - 1))))]; };
+  const ret = (b) => (b / startBal - 1) * 100;
+  return {
+    success: true,
+    inputs: { winRate: wr, rrRatio: rr, riskPct: r, startBalance: startBal, trades: nTrades, runs: nRuns, compounding, ruinDrawdownPct: ruinDD },
+    finalReturnPct: { median: Number(ret(pctl(finals, 0.5)).toFixed(1)), p10: Number(ret(pctl(finals, 0.1)).toFixed(1)), p90: Number(ret(pctl(finals, 0.9)).toFixed(1)) },
+    maxDrawdownPct: { median: Number(pctl(maxDDs, 0.5).toFixed(1)), p90: Number(pctl(maxDDs, 0.9).toFixed(1)), worst: Number(pctl(maxDDs, 1).toFixed(1)) },
+    longestLosingStreak: { median: pctl(streaks, 0.5), worst: pctl(streaks, 1) },
+    profitableRunsPct: Number((profitable / nRuns * 100).toFixed(1)),
+    ruinRunsPct: Number((ruined / nRuns * 100).toFixed(1)),
+    note: `Monte Carlo: ${nRuns} runs × ${nTrades} trades. Ruin = peak-to-trough drawdown ≥ ${ruinDD}%. Theoretical — excludes commission, slippage and tax, so treat ruin % as a floor, not a ceiling.`,
+  };
+}
+
 /** Read open futures positions (futures only). */
 export async function getPositions({ market = 'futures', symbol, account = '1', _deps = {} } = {}) {
   if (!isFuturesLike(market)) throw new Error('getPositions is futures-only');

@@ -15,6 +15,7 @@ import {
   setPositionMode, modifyOrder, getOrderHistory, getLeverageBrackets, getAccountSummary,
   placeLadder, ensureProtectiveStop, adjustIsolatedMargin, getFundingRate, getIncome, getAccountSnapshot,
   calcPositionSize, getRiskReport,
+  calcExpectancy, estimateLosingStreak, simulateEquity,
   getUiKlines, getTradingDayTicker, startUserStream, keepAliveUserStream, closeUserStream,
   watchPrice, compareSymbols, buildMarketStream, formatMarketEvent,
   getLiquidationHistory, getDepositHistory, getWithdrawHistory, getDepositAddress,
@@ -1173,6 +1174,87 @@ describe('calcPositionSize', () => {
   it('requires entry !== stop and a risk budget', async () => {
     await assert.rejects(calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 60000, stop: 60000, riskAmount: 100, _deps: deps() }), /must differ/);
     await assert.rejects(calcPositionSize({ market: 'futures', symbol: 'BTCUSDC', entry: 60000, stop: 59000, _deps: deps() }), /riskAmount.*riskPct/);
+  });
+});
+
+describe('calcExpectancy — the math of expectancy', () => {
+  it('reproduces the 50% / 2:1 / $100 → $5000-over-100-trades example', () => {
+    const r = calcExpectancy({ winRate: 50, rrRatio: 2, riskAmount: 100, trades: 100 });
+    assert.equal(r.expectancyR, 0.5);              // 0.5·2 − 0.5·1
+    assert.equal(r.expectancyPerTrade, 50);        // 0.5R × $100
+    assert.equal(r.expectedPnlOverTrades, 5000);   // × 100 trades
+    assert.equal(r.edge, 'positive');
+  });
+  it('computes break-even win rate 1/(1+rr) — 33.33% for 2:1', () => {
+    const r = calcExpectancy({ winRate: 40, rrRatio: 2 });
+    assert.equal(r.breakevenWinRatePct, 33.33);
+    assert.equal(r.marginOverBreakevenPct, 6.67);  // 40 − 33.33
+  });
+  it('flags a negative edge below break-even', () => {
+    const r = calcExpectancy({ winRate: 30, rrRatio: 2 });
+    assert.equal(r.edge, 'negative');
+    assert.ok(r.expectancyR < 0);
+  });
+  it('derives $ risk from riskPct × balance and a %-per-trade expectancy', () => {
+    const r = calcExpectancy({ winRate: 50, rrRatio: 2, riskPct: 1, balance: 10000 });
+    assert.equal(r.riskPerTrade, 100);
+    assert.equal(r.expectancyPctPerTrade, 0.5);    // 0.5R × 1%
+  });
+  it('rejects bad inputs', () => {
+    assert.throws(() => calcExpectancy({ winRate: 50, rrRatio: 0 }), /rrRatio/);
+    assert.throws(() => calcExpectancy({ winRate: 120, rrRatio: 2 }), /winRate/);
+  });
+});
+
+describe('estimateLosingStreak — Nick Radge probabilistic estimate', () => {
+  it("matches the video's numbers: 90%/1000→3, 90%/1M→6, 60%/1000→8", () => {
+    assert.equal(estimateLosingStreak({ winRate: 90, sampleSize: 1000 }).maxLosingStreak, 3);
+    assert.equal(estimateLosingStreak({ winRate: 90, sampleSize: 1000000 }).maxLosingStreak, 6);
+    assert.equal(estimateLosingStreak({ winRate: 60, sampleSize: 1000 }).maxLosingStreak, 8);
+  });
+  it('returns a table across sample sizes', () => {
+    const r = estimateLosingStreak({ winRate: 60, sampleSize: 1000 });
+    assert.equal(r.table.length, 5);
+    assert.equal(r.table.find((t) => t.sampleSize === 1000000).maxLosingStreak, 16);
+  });
+  it('adds the implied drawdown when riskPct is given', () => {
+    const r = estimateLosingStreak({ winRate: 60, sampleSize: 1000, riskPct: 2 });
+    assert.equal(r.streakDrawdownPctFixed, 16);    // 8 losses × 2%
+    assert.ok(r.streakDrawdownPctCompounded < 16); // geometric is gentler
+    assert.ok(r.streakDrawdownPctCompounded > 14);
+  });
+  it('rejects win rates at or beyond the bounds', () => {
+    assert.throws(() => estimateLosingStreak({ winRate: 100 }), /strictly between/);
+    assert.throws(() => estimateLosingStreak({ winRate: 0 }), /strictly between/);
+  });
+});
+
+describe('simulateEquity — Monte Carlo (deterministic via injected rng)', () => {
+  // rng that always wins (returns 0 < p) → every trade is a win, no drawdown, no ruin
+  const alwaysWin = () => 0;
+  // rng that always loses (returns ~1 ≥ p) → every trade loses
+  const alwaysLose = () => 0.999999;
+  it('all-wins run: positive return, zero drawdown, zero ruin', () => {
+    const r = simulateEquity({ winRate: 50, rrRatio: 2, riskPct: 1, trades: 100, runs: 5, _deps: { rng: alwaysWin } });
+    assert.equal(r.ruinRunsPct, 0);
+    assert.equal(r.maxDrawdownPct.worst, 0);
+    assert.equal(r.profitableRunsPct, 100);
+    assert.ok(r.finalReturnPct.median > 0);
+  });
+  it('all-losses run: every run ruined, longest streak = trade count', () => {
+    const r = simulateEquity({ winRate: 50, rrRatio: 2, riskPct: 2, trades: 50, runs: 5, ruinDrawdownPct: 50, _deps: { rng: alwaysLose } });
+    assert.equal(r.ruinRunsPct, 100);
+    assert.equal(r.profitableRunsPct, 0);
+    assert.equal(r.longestLosingStreak.worst, 50);
+  });
+  it('caps trades and runs, echoes inputs', () => {
+    const r = simulateEquity({ winRate: 55, rrRatio: 1, trades: 999999, runs: 99999, _deps: { rng: alwaysWin } });
+    assert.equal(r.inputs.trades, 100000);
+    assert.equal(r.inputs.runs, 10000);
+  });
+  it('rejects bad inputs', () => {
+    assert.throws(() => simulateEquity({ winRate: 50, rrRatio: 0 }), /rrRatio/);
+    assert.throws(() => simulateEquity({ winRate: 50, rrRatio: 2, riskPct: 0 }), /riskPct/);
   });
 });
 
