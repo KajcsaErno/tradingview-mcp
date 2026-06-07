@@ -270,6 +270,29 @@ export function registerBinanceTools(server) {
     durationSec: z.coerce.number().min(1).max(60).default(10).describe('How long to watch, in seconds (1-60, default 10)'),
   }, wrap(core.watchPrice));
 
+  server.tool('binance_watch_order_flow', 'Watch real-time order flow over a bounded WebSocket window and return a microstructure read: aggressive buy/sell delta (aggTrades), spread/top-of-book, and depth imbalance from a partial order book stream. Practical Binance-native "heatmap/footprint" proxy.', {
+    market, symbol,
+    durationSec: z.coerce.number().min(1).max(60).default(10).describe('How long to watch, in seconds (1-60, default 10)'),
+    levels: z.coerce.number().default(20).describe('Partial depth levels to track (Binance stream supports 5, 10, 20; values are snapped to the nearest supported level).'),
+  }, wrap(core.watchOrderFlow));
+
+  server.tool('binance_get_footprint_bars', 'Footprint-style per-candle aggression from Binance klines: estimates aggressive buy/sell quote flow using takerBuyQuoteVolume vs quoteVolume, with per-bar delta and flow tags (buyers/sellers in control).', {
+    market, symbol,
+    interval: z.enum(['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']).default('1m'),
+    limit: z.coerce.number().default(100).describe('Bars to analyze (default 100, max 500)'),
+  }, wrap(core.getFootprintBars));
+
+  server.tool('binance_get_volatility_regime', 'Multi-timeframe realized-volatility model from Binance klines: annualized realized vol, Parkinson vol, ATR%, and downside/upside volatility skew proxy across intervals (default 5m/15m/1h/4h). Returns regime + skew tags. NOTE: realized-vol model, not options-implied IV.', {
+    market, symbol,
+    intervals: z.array(z.string()).optional().describe('Intervals to model, e.g. ["5m","15m","1h","4h"] (default that set).'),
+    limit: z.coerce.number().default(300).describe('Bars per interval (default 300, min 30, max 1500)'),
+  }, wrap(core.getVolatilityRegime));
+
+  server.tool('binance_get_options_surface', 'Binance Options implied-volatility surface + skew snapshot (public EAPI): per-contract markIV/bidIV/askIV/greeks, per-expiry average IV term structure, and ATM call-vs-put skew. This is the options-implied complement to binance_get_volatility_regime.', {
+    underlying: z.string().default('BTCUSDT').describe('Underlying pair, e.g. BTCUSDT or ETHUSDT'),
+    expirations: z.array(z.string()).optional().describe('Optional expiry filter list in YYYYMMDD format, e.g. ["20260626","20260925"]'),
+  }, wrap(core.getOptionsSurface));
+
   server.tool('binance_get_account_trades', "User's account trades for a symbol (signed)", {
     market, symbol, fromId: z.union([z.string(), z.number()]).optional(), limit: z.coerce.number().optional(), account,
   }, wrap(core.getAccountTrades));
