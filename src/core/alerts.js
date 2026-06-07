@@ -1,7 +1,15 @@
 /**
  * Core alert logic.
  */
-import { evaluate, evaluateAsync, getClient, safeString, requireFinite } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, safeString, requireFinite } from '../connection.js';
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getClient: deps?.getClient || _getClient,
+  };
+}
 
 // Webpack module IDs sniffed from TradingView Desktop bundle (3.1.0.7818, 2026-05).
 // Required for the activate() facade path. If TradingView ever rebuilds with a
@@ -9,7 +17,8 @@ import { evaluate, evaluateAsync, getClient, safeString, requireFinite } from '.
 // in static.tradingview.com/static/bundles/*.js.
 const TV_CHART_ALERTS_FACADE_MODULE = 144534;
 
-export async function create({ condition, price, message }) {
+export async function create({ condition, price, message, _deps }) {
+  const { evaluate, getClient } = _resolve(_deps);
   const opened = await evaluate(`
     (function() {
       var btn = document.querySelector('[aria-label="Create alert"]')
@@ -79,7 +88,8 @@ export async function create({ condition, price, message }) {
   return { success: !!created, price, condition, message: message || '(none)', price_set: !!priceSet, source: 'dom_fallback' };
 }
 
-export async function list() {
+export async function list({ _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
   // Use pricealerts REST API — returns structured data with alert_id, symbol, price, conditions
   const result = await evaluateAsync(`
     fetch('https://pricealerts.tradingview.com/list_alerts', { credentials: 'include' })
@@ -110,7 +120,8 @@ export async function list() {
   return { success: true, alert_count: result?.alerts?.length || 0, source: 'internal_api', alerts: result?.alerts || [], error: result?.error };
 }
 
-export async function activate({ alert_id }) {
+export async function activate({ alert_id, _deps }) {
+  const { evaluateAsync } = _resolve(_deps);
   const id = requireFinite(Number(alert_id), 'alert_id');
   const result = await evaluateAsync(`
     (async function() {
@@ -149,7 +160,8 @@ export async function activate({ alert_id }) {
   return { success: false, alert_id: id, error: (result && result.error) || 'unknown', source: 'chart_alerts_facade' };
 }
 
-export async function deleteAlerts({ delete_all }) {
+export async function deleteAlerts({ delete_all, _deps }) {
+  const { evaluate } = _resolve(_deps);
   if (delete_all) {
     const result = await evaluate(`
       (function() {
