@@ -131,7 +131,12 @@ describe('CLI — pine analyze (offline)', () => {
   });
 });
 
-describe('CLI — pine check (server compile)', () => {
+// Network integration tests — drive `tv pine check`, which calls TradingView's
+// pine-facade over the network. Opt-in only (skipped by default so the offline
+// suite and CI stay deterministic). Run with RUN_NETWORK_TESTS=1.
+const skipNetwork = process.env.RUN_NETWORK_TESTS ? false : 'requires network — set RUN_NETWORK_TESTS=1';
+
+describe('CLI — pine check (server compile)', { skip: skipNetwork }, () => {
   it('compiles valid Pine Script', () => {
     const source = '//@version=6\nindicator("test")\nplot(close)';
     const { stdout, exitCode } = run(['pine', 'check'], { input: source });

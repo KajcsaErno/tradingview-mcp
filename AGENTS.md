@@ -224,18 +224,18 @@ const KNOWN_PATHS = {
 
 ### Unit Tests (No TradingView Required)
 
-**File**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/morning.test.js`, `tests/binance.test.js`
+**Files**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/morning.test.js`, `tests/binance.test.js`, `tests/sanitization.test.js`, `tests/replay.test.js`
 
 ```bash
-npm run test:unit
+npm test            # the full offline suite (alias: npm run test:unit)
 ```
 
-Additional targeted unit suites:
+Run an individual suite:
 
 ```bash
-node --test tests/sanitization.test.js
-node --test tests/replay.test.js
-node --test tests/morning.test.js
+npm run test:sanitization   # node --test tests/sanitization.test.js
+npm run test:replay         # node --test tests/replay.test.js
+npm run test:binance        # node --test tests/binance.test.js
 ```
 
 Use `mockDeps()` to capture generated JS expressions:

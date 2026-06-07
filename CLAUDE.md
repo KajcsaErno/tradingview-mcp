@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-143 MCP tools total (and matching `tv` CLI commands): **79 for reading and controlling a live TradingView Desktop chart** via Chrome DevTools Protocol on `localhost:9222`, plus **64 in the separate Binance trading module**. Two consumers, one core: an MCP server (stdio) and a pipe-friendly CLI.
+146 MCP tools total (and matching `tv` CLI commands): **82 for reading and controlling a live TradingView Desktop chart** via Chrome DevTools Protocol on `localhost:9222` (including the rules-based **morning workflow** module — `morning_brief` / `session_save` / `session_get`), plus **64 in the separate Binance trading module**. Two consumers, one core: an MCP server (stdio) and a pipe-friendly CLI.
 
 There is also a **separate, optional Binance trading module** (`src/core/binance.js` + `tv binance` + `binance_*` MCP tools — 64 tools / 66 CLI subcommands) that talks directly to Binance's signed REST API with the user's own API keys. It is **independent of the TradingView/CDP layer** (no chart involved) and can place **real orders**. See "Binance module" below before touching it.
 
@@ -15,14 +15,18 @@ npm install                        # zero-config, only @modelcontextprotocol/sdk
 npm start                          # run MCP server (stdio)
 npm run tv -- <command>            # run CLI (or `node src/cli/index.js`)
 
-npm test                           # e2e + pine_analyze (e2e REQUIRES TradingView running on :9222)
-npm run test:unit                  # pine_analyze + cli — no TradingView needed
+npm test                           # full OFFLINE suite — no TradingView needed (pine_analyze + cli + morning + binance + sanitization + replay)
+npm run test:unit                  # same offline suite as `npm test`
 npm run test:cli                   # CLI router tests
-npm run test:e2e                   # full e2e (needs live TradingView)
-npm run test:all                   # e2e + pine_analyze + cli
+npm run test:e2e                   # full e2e (REQUIRES live TradingView on :9222)
+npm run test:all                   # offline suite + e2e (needs live TradingView)
 npm run test:verbose               # spec reporter
-node --test tests/sanitization.test.js   # CDP injection-prevention tests (pure unit, no TV)
-node --test tests/replay.test.js         # replay logic unit tests
+npm run test:sanitization          # CDP injection-prevention tests (pure unit, no TV)
+npm run test:replay                # replay logic unit tests
+
+# The pine-facade "server compile" suites (in pine_analyze/cli tests) hit
+# TradingView's network endpoint and are SKIPPED by default. Opt in with:
+RUN_NETWORK_TESTS=1 npm run test:unit
 
 # Run a single test by name filter
 node --test --test-name-pattern="setSymbol" tests/sanitization.test.js
@@ -261,6 +265,7 @@ The repo ships Claude Code–native skills (in `skills/`) and a custom subagent 
 | `skills/binance-multi-account-mirror/` | Pre-flight (hedge/3x) then mirror a trade across accounts by balance ratio |
 | `skills/binance-trade-review/` | Post-trade review: realized PnL, funding, commissions, fills |
 | `skills/trading-system-planner/` | Plan risk from the math of expectancy: pick a win-rate/R:R archetype, then size risk-% so expected losing-streak drawdown stays inside tolerance (uses `calcExpectancy`/`estimateLosingStreak`/`simulateEquity`) |
+| `skills/binance-strategy-optimizer/` | Self-iterating backtester sweep over symbols × timeframes × the 9 strategies; ranks by a risk metric, validates the leader out-of-sample, and keeps a best-so-far leaderboard (read-only, no orders) |
 | `agents/performance-analyst.md` | Subagent: gather strategy data and analyze performance |
 | `agents/binance-risk-analyst.md` | Subagent: deep read-only multi-account Binance risk/exposure sweep |
 
