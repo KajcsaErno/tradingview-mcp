@@ -23,6 +23,8 @@ npm run test:all                   # offline suite + e2e (needs live TradingView
 npm run test:verbose               # spec reporter
 npm run test:sanitization          # CDP injection-prevention tests (pure unit, no TV)
 npm run test:replay                # replay logic unit tests
+npm run test:core                  # _deps-injected tests for chart/data/indicators/tab/pane/alerts/watchlist
+npm run lint                       # ESLint (flat config); also runs in CI
 
 # The pine-facade "server compile" suites (in pine_analyze/cli tests) hit
 # TradingView's network endpoint and are SKIPPED by default. Opt in with:

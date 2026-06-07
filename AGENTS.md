@@ -224,7 +224,9 @@ const KNOWN_PATHS = {
 
 ### Unit Tests (No TradingView Required)
 
-**Files**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/morning.test.js`, `tests/binance.test.js`, `tests/sanitization.test.js`, `tests/replay.test.js`
+**Files**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/morning.test.js`, `tests/binance.test.js`, `tests/sanitization.test.js`, `tests/replay.test.js`, `tests/core_di.test.js`
+
+`tests/core_di.test.js` holds `_deps`-injected unit tests for the chart/indicators/watchlist/tab/pane/alerts/data modules — mock `evaluate`/`evaluateAsync`/`fetch` via `_deps` and assert on validation, response shaping, and `safeString()` use.
 
 ```bash
 npm test            # the full offline suite (alias: npm run test:unit)
@@ -235,6 +237,7 @@ Run an individual suite:
 ```bash
 npm run test:sanitization   # node --test tests/sanitization.test.js
 npm run test:replay         # node --test tests/replay.test.js
+npm run test:core           # node --test tests/core_di.test.js
 npm run test:binance        # node --test tests/binance.test.js
 ```
 
