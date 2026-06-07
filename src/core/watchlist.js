@@ -2,7 +2,7 @@
  * Core watchlist logic.
  * Uses TradingView's internal widget API with DOM fallback.
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { evaluate, getClient } from '../connection.js';
 
 export async function get() {
   // Try internal API first — reads from the active watchlist widget

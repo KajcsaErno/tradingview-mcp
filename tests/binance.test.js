@@ -1277,7 +1277,7 @@ describe('getRiskReport', () => {
 describe('signedRequest — rate-limit backoff', () => {
   it('retries on a 429 then succeeds (no real sleep)', async () => {
     let n = 0;
-    const fetch = async (url, opts = {}) => {
+    const fetch = async (url, _opts = {}) => {
       // exchangeInfo etc. not needed here; getOrderHistory only signs allOrders
       n += 1;
       if (n === 1) return { ok: false, status: 429, headers: { get: () => null }, json: async () => ({}) };

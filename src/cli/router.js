@@ -157,7 +157,7 @@ function validateOptions(values, options, cmdName, subName) {
       groups[v.oneOfGroup].push(k);
     }
   }
-  for (const [groupName, keys] of Object.entries(groups)) {
+  for (const [, keys] of Object.entries(groups)) {
     const anyPresent = keys.some((k) => Object.prototype.hasOwnProperty.call(values, k) && values[k] !== undefined);
     if (!anyPresent) {
       const full = subName ? `${cmdName} ${subName}` : cmdName;
@@ -175,7 +175,7 @@ function validateOptions(values, options, cmdName, subName) {
       mexGroups[v.mutuallyExclusiveGroup].push(k);
     }
   }
-  for (const [groupName, keys] of Object.entries(mexGroups)) {
+  for (const [, keys] of Object.entries(mexGroups)) {
     const present = keys.filter((k) => Object.prototype.hasOwnProperty.call(values, k) && values[k] !== undefined);
     if (present.length > 1) {
       const full = subName ? `${cmdName} ${subName}` : cmdName;

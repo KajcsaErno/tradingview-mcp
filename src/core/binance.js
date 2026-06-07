@@ -2614,7 +2614,7 @@ const STRATEGIES = {
   },
   supertrend: {
     name: 'Supertrend (ATR)', desc: 'follow the ATR(10,3) trend direction',
-    fn: ({ closes, ind }) => ind.superT.dir.map((d) => (d == null ? 0 : d)),
+    fn: ({ ind }) => ind.superT.dir.map((d) => (d == null ? 0 : d)),
   },
   donchian: {
     name: 'Donchian breakout', desc: 'Turtle-style: long on 20-bar high break, short on 20-bar low break',
