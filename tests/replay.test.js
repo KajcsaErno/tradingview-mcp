@@ -288,7 +288,7 @@ describe('stop()', () => {
 describe('trade()', () => {
   for (const action of ['buy', 'sell', 'close']) {
     it(`executes ${action} action`, async () => {
-      const { _deps, evaluate } = mockDeps({
+      const { _deps } = mockDeps({
         'isReplayStarted': true,
         [action === 'close' ? 'closePosition' : action]: undefined,
         'position': 1,
@@ -324,7 +324,7 @@ describe('trade()', () => {
 describe('status()', () => {
   it('returns full status object', async () => {
     let callIdx = 0;
-    const evaluate = async (expr) => {
+    const evaluate = async (_expr) => {
       callIdx++;
       // Call 1: big inline IIFE for status fields
       if (callIdx === 1) {
