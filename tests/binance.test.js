@@ -1374,17 +1374,18 @@ describe('watchPrice', () => {
 });
 
 describe('watchOrderFlow', () => {
-  it('builds a combined stream URL (aggTrade + depth + bookTicker)', async () => {
-    const { cls, seen } = makeWS({ messages: [{ data: { e: 'aggTrade', p: '1', q: '1', m: false, T: 1 } }] });
+  it('builds a combined stream URL (trade + depth + bookTicker)', async () => {
+    const { cls, seen } = makeWS({ messages: [{ data: { e: 'trade', p: '1', q: '1', m: false, T: 1 } }] });
     await watchOrderFlow({ market: 'futures', symbol: 'BTCUSDC', levels: 20, _deps: { WebSocket: cls, ...inertTimers } });
-    assert.equal(seen.url, 'wss://fstream.binance.com/stream?streams=btcusdc@aggTrade/btcusdc@depth20@100ms/btcusdc@bookTicker');
+    // @trade (not @aggTrade): the futures @aggTrade stream intermittently delivers nothing.
+    assert.equal(seen.url, 'wss://fstream.binance.com/stream?streams=btcusdc@trade/btcusdc@depth20@100ms/btcusdc@bookTicker');
   });
 
   it('summarizes aggression delta, spread and depth imbalance', async () => {
     const { cls } = makeWS({
       messages: [
-        { data: { e: 'aggTrade', p: '100', q: '2', m: false, T: 10 } },
-        { data: { e: 'aggTrade', p: '101', q: '1', m: true, T: 11 } },
+        { data: { e: 'trade', p: '100', q: '2', m: false, T: 10 } },
+        { data: { e: 'trade', p: '101', q: '1', m: true, T: 11 } },
         { data: { e: 'depthUpdate', b: [['100', '5'], ['99', '2']], a: [['101', '4'], ['102', '3']], E: 12 } },
         { data: { s: 'BTCUSDC', b: '100', B: '1', a: '101', A: '1', E: 13 } },
       ],
@@ -1505,6 +1506,26 @@ describe('getOptionsSurface', () => {
     assert.equal(r.contracts, 1);
     assert.equal(r.expiries.length, 1);
     assert.equal(r.expiries[0].expiry, '20260626');
+  });
+
+  it('omits the per-contract chain by default and includes it only with full:true', async () => {
+    const exchangeInfo = {
+      optionSymbols: [
+        { symbol: 'BTC-260626-60000-C', underlying: 'BTCUSDT', expiryDate: Date.UTC(2026, 5, 26), strikePrice: '60000', side: 'CALL' },
+      ],
+    };
+    const marks = [{ symbol: 'BTC-260626-60000-C', markIV: '0.55' }];
+    const dps = optionsDeps(exchangeInfo, marks, { indexPrice: '60000' });
+
+    const summary = await getOptionsSurface({ underlying: 'BTCUSDT', _deps: dps });
+    assert.equal(summary.surface, undefined);
+    assert.match(summary.surfaceOmitted, /1 contracts/);
+    assert.equal(summary.expiries.length, 1); // summary is still present
+
+    const full = await getOptionsSurface({ underlying: 'BTCUSDT', full: true, _deps: dps });
+    assert.equal(full.surfaceOmitted, undefined);
+    assert.ok(Array.isArray(full.surface));
+    assert.equal(full.surface.length, 1);
   });
 });
 
