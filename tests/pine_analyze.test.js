@@ -240,7 +240,12 @@ strategy.entry("Long", strategy.long)`);
   });
 });
 
-describe('pine_check — server compile', () => {
+// Network integration tests against TradingView's pine-facade — opt-in only
+// (require outbound network + the public endpoint; skipped by default so the
+// offline suite and CI stay deterministic). Run with RUN_NETWORK_TESTS=1.
+const skipNetwork = process.env.RUN_NETWORK_TESTS ? false : 'requires network — set RUN_NETWORK_TESTS=1';
+
+describe('pine_check — server compile', { skip: skipNetwork }, () => {
   it('should compile valid Pine Script via TradingView API', async () => {
     const source = `//@version=6
 indicator("API Test", overlay=true)

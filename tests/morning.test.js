@@ -1,6 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { join, parse } from 'node:path';
 import { getSession, runBrief, saveSession } from '../src/core/morning.js';
+
+// A path outside both PROJECT_ROOT and the user-data dir on any platform —
+// filesystem root + a folder that can't be inside the repo ('/outside-repo/...'
+// on POSIX, 'C:\\outside-repo\\...' on Windows).
+const OUTSIDE_REPO_PATH = join(parse(process.cwd()).root, 'outside-repo', 'rules.json');
 
 function makeMemoryFs() {
   const files = new Map();
@@ -68,7 +74,7 @@ describe('morning core', () => {
   it('runBrief rejects unsafe rules_path locations', async () => {
     await assert.rejects(
       () => runBrief({
-        rules_path: 'C:/Windows/System32/rules.json',
+        rules_path: OUTSIDE_REPO_PATH,
         _deps: {
           homedir: () => 'C:/Users/tester',
           existsSync: () => true,
