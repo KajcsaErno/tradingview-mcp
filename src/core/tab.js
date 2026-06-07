@@ -2,15 +2,23 @@
  * Core tab management logic.
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
-import { getClient, evaluate } from '../connection.js';
+import { getClient as _getClient } from '../connection.js';
 
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
 
+function _resolve(deps) {
+  return {
+    getClient: deps?.getClient || _getClient,
+    fetch: deps?.fetch || fetch,
+  };
+}
+
 /**
  * List all open chart tabs (CDP page targets).
  */
-export async function list() {
+export async function list({ _deps } = {}) {
+  const { fetch } = _resolve(_deps);
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
 
@@ -30,7 +38,8 @@ export async function list() {
 /**
  * Open a new chart tab via keyboard shortcut (Ctrl+T / Cmd+T).
  */
-export async function newTab() {
+export async function newTab({ _deps } = {}) {
+  const { getClient } = _resolve(_deps);
   const c = await getClient();
 
   // Electron/TradingView Desktop uses Ctrl+T for new tab on macOS too
@@ -50,15 +59,16 @@ export async function newTab() {
   await new Promise(r => setTimeout(r, 2000));
 
   // Verify a new tab appeared
-  const state = await list();
+  const state = await list({ _deps });
   return { success: true, action: 'new_tab_opened', ...state };
 }
 
 /**
  * Close the current tab via keyboard shortcut (Ctrl+W / Cmd+W).
  */
-export async function closeTab() {
-  const before = await list();
+export async function closeTab({ _deps } = {}) {
+  const { getClient } = _resolve(_deps);
+  const before = await list({ _deps });
   if (before.tab_count <= 1) {
     throw new Error('Cannot close the last tab. Use tv_launch to restart TradingView instead.');
   }
@@ -78,15 +88,16 @@ export async function closeTab() {
 
   await new Promise(r => setTimeout(r, 1000));
 
-  const after = await list();
+  const after = await list({ _deps });
   return { success: true, action: 'tab_closed', tabs_before: before.tab_count, tabs_after: after.tab_count };
 }
 
 /**
  * Switch to a tab by index. Reconnects CDP to the new target.
  */
-export async function switchTab({ index }) {
-  const tabs = await list();
+export async function switchTab({ index, _deps }) {
+  const { fetch } = _resolve(_deps);
+  const tabs = await list({ _deps });
   const idx = Number(index);
 
   if (idx >= tabs.tab_count) {
@@ -98,7 +109,7 @@ export async function switchTab({ index }) {
   // Use CDP Target.activateTarget to bring the tab to front
   try {
     const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
-    const text = await resp.text();
+    await resp.text();
     return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);

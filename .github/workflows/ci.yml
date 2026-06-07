@@ -16,6 +16,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - run: npm run lint
       # Offline suite only — no live TradingView (:9222) and no Binance keys.
       # The Binance tests are fully dependency-injected (no network).
       - run: npm test

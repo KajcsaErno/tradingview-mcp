@@ -76,7 +76,7 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       Runtime = client.Runtime;
       Input = client.Input;
       Page = client.Page;
-    } catch (err) {
+    } catch (_err) {
       console.error('Cannot connect to TradingView. Make sure it is running with --remote-debugging-port=9222');
       process.exit(1);
     }
