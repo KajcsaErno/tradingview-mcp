@@ -3,12 +3,29 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  test:
-    name: Offline tests
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    name: Offline tests (${{ matrix.os }}, node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ ubuntu-latest, windows-latest ]
         node-version: [20.x, 22.x]
+        exclude:
+          # node --test glob args need Node >= 21 when the shell (cmd) doesn't expand them
+          - os: windows-latest
+            node-version: 20.x
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,7 +33,6 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm run lint
       # Offline suite only — no live TradingView (:9222) and no Binance keys.
       # The Binance tests are fully dependency-injected (no network).
       - run: npm test

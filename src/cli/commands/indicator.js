@@ -1,4 +1,4 @@
-import { register } from '../router.js';
+import {register} from '../router.js';
 import * as chartCore from '../../core/chart.js';
 import * as indCore from '../../core/indicators.js';
 import * as dataCore from '../../core/data.js';
@@ -31,7 +31,8 @@ register('indicator', {
       },
       handler: (opts, positionals) => {
         if (!positionals[0]) throw new Error('Entity ID required. Usage: tv indicator toggle eFu1Ot --visible');
-        const visible = opts.hidden ? false : (opts.visible !== undefined ? opts.visible : true);
+          let visible = opts.visible === undefined ? true : opts.visible;
+          if (opts.hidden) visible = false;
         return indCore.toggleVisibility({ entity_id: positionals[0], visible });
       },
     }],

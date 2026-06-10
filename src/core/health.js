@@ -1,9 +1,9 @@
 /**
  * Core health/discovery/launch logic.
  */
-import { getClient, getTargetInfo, evaluate } from '../connection.js';
-import { existsSync } from 'fs';
-import { execSync, spawn } from 'child_process';
+import {evaluate, getClient, getTargetInfo} from '../connection.js';
+import {existsSync} from 'fs';
+import {execSync, spawn} from 'child_process';
 
 export async function healthCheck() {
   await getClient();
@@ -159,95 +159,116 @@ export async function uiState() {
   return { success: true, ...state };
 }
 
-export async function launch({ port, kill_existing } = {}) {
-  const cdpPort = port || 9222;
-  const killFirst = kill_existing !== false;
-  const platform = process.platform;
-
-  const pathMap = {
-    darwin: [
-      '/Applications/TradingView.app/Contents/MacOS/TradingView',
-      `${process.env.HOME}/Applications/TradingView.app/Contents/MacOS/TradingView`,
-    ],
-    win32: [
-      `${process.env.LOCALAPPDATA}\\TradingView\\TradingView.exe`,
-      `${process.env.PROGRAMFILES}\\TradingView\\TradingView.exe`,
-      `${process.env['PROGRAMFILES(X86)']}\\TradingView\\TradingView.exe`,
-    ],
-    linux: [
-      '/opt/TradingView/tradingview',
-      '/opt/TradingView/TradingView',
-      `${process.env.HOME}/.local/share/TradingView/TradingView`,
-      '/usr/bin/tradingview',
-      '/snap/tradingview/current/tradingview',
-    ],
-  };
-
-  let tvPath = null;
-  const candidates = pathMap[platform] || pathMap.linux;
+function findFromCandidates(candidates) {
   for (const p of candidates) {
-    if (p && existsSync(p)) { tvPath = p; break; }
+      if (p && existsSync(p)) return p;
   }
+    return null;
+}
 
-  if (!tvPath && platform === 'win32') {
+function findWindowsStoreInstall() {
     // MSIX / Microsoft Store install. The folder name is version-pinned
     // (e.g. TradingView.Desktop_3.1.0.7818_x64__n534cwy3pjxzj) and lives
     // under %PROGRAMFILES%\WindowsApps, which non-admin cmd globs can't
     // enumerate — query the package manager directly.
     try {
-      const ps = 'powershell -NoProfile -Command "(Get-AppxPackage TradingView.Desktop).InstallLocation"';
-      const installLoc = execSync(ps, { timeout: 5000 }).toString().trim();
-      if (installLoc) {
-        const candidate = `${installLoc}\\TradingView.exe`;
-        if (existsSync(candidate)) tvPath = candidate;
-      }
-    } catch { /* ignore */ }
-  }
+        const ps = 'powershell -NoProfile -Command "(Get-AppxPackage TradingView.Desktop).InstallLocation"';
+        const installLoc = execSync(ps, {timeout: 5000}).toString().trim();
+        if (installLoc) {
+            const candidate = `${installLoc}\\TradingView.exe`;
+            if (existsSync(candidate)) return candidate;
+        }
+    } catch { /* ignore */
+    }
+    return null;
+}
 
-  if (!tvPath) {
+function findOnSystemPath(platform) {
     try {
-      const cmd = platform === 'win32' ? 'where TradingView.exe' : 'which tradingview';
-      tvPath = execSync(cmd, { timeout: 3000 }).toString().trim().split('\n')[0];
-      if (tvPath && !existsSync(tvPath)) tvPath = null;
-    } catch { /* ignore */ }
-  }
+        const cmd = platform === 'win32' ? 'where TradingView.exe' : 'which tradingview';
+        const found = execSync(cmd, {timeout: 3000}).toString().trim().split('\n')[0];
+        if (found && existsSync(found)) return found;
+    } catch { /* ignore */
+    }
+    return null;
+}
 
-  if (!tvPath && platform === 'darwin') {
+function findViaMdfind() {
     try {
-      const found = execSync('mdfind "kMDItemFSName == TradingView.app" | head -1', { timeout: 5000 }).toString().trim();
-      if (found) {
-        const candidate = `${found}/Contents/MacOS/TradingView`;
-        if (existsSync(candidate)) tvPath = candidate;
-      }
-    } catch { /* ignore */ }
-  }
+        const found = execSync('mdfind "kMDItemFSName == TradingView.app" | head -1', {timeout: 5000}).toString().trim();
+        if (found) {
+            const candidate = `${found}/Contents/MacOS/TradingView`;
+            if (existsSync(candidate)) return candidate;
+        }
+    } catch { /* ignore */
+    }
+    return null;
+}
 
-  if (!tvPath) {
-    throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
-  }
-
-  if (killFirst) {
+async function killExistingTradingView(platform) {
     try {
-      if (platform === 'win32') execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
-      else execSync('pkill -f TradingView', { timeout: 5000 });
-      await new Promise(r => setTimeout(r, 1500));
-    } catch { /* may not be running */ }
-  }
+        if (platform === 'win32') execSync('taskkill /F /IM TradingView.exe', {timeout: 5000});
+        else execSync('pkill -f TradingView', {timeout: 5000});
+        await new Promise(r => setTimeout(r, 1500));
+    } catch { /* may not be running */
+    }
+}
 
-  const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
-  child.unref();
-
-  for (let i = 0; i < 15; i++) {
-    await new Promise(r => setTimeout(r, 1000));
-    try {
-      const http = await import('http');
-      const ready = await new Promise((resolve) => {
+async function fetchCdpVersion(cdpPort) {
+    const http = await import('http');
+    return new Promise((resolve) => {
         http.get(`http://localhost:${cdpPort}/json/version`, (res) => {
-          let data = '';
-          res.on('data', (chunk) => data += chunk);
-          res.on('end', () => resolve(data));
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => resolve(data));
         }).on('error', () => resolve(null));
-      });
+    });
+}
+
+export async function launch({port, kill_existing} = {}) {
+    const cdpPort = port || 9222;
+    const killFirst = kill_existing !== false;
+    const platform = process.platform;
+
+    const pathMap = {
+        darwin: [
+            '/Applications/TradingView.app/Contents/MacOS/TradingView',
+            `${process.env.HOME}/Applications/TradingView.app/Contents/MacOS/TradingView`,
+        ],
+        win32: [
+            `${process.env.LOCALAPPDATA}\\TradingView\\TradingView.exe`,
+            `${process.env.PROGRAMFILES}\\TradingView\\TradingView.exe`,
+            `${process.env['PROGRAMFILES(X86)']}\\TradingView\\TradingView.exe`,
+        ],
+        linux: [
+            '/opt/TradingView/tradingview',
+            '/opt/TradingView/TradingView',
+            `${process.env.HOME}/.local/share/TradingView/TradingView`,
+            '/usr/bin/tradingview',
+            '/snap/tradingview/current/tradingview',
+        ],
+    };
+
+    const candidates = pathMap[platform] || pathMap.linux;
+    let tvPath = findFromCandidates(candidates);
+
+    if (!tvPath && platform === 'win32') tvPath = findWindowsStoreInstall();
+    if (!tvPath) tvPath = findOnSystemPath(platform);
+    if (!tvPath && platform === 'darwin') tvPath = findViaMdfind();
+
+    if (!tvPath) {
+        throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
+    }
+
+    if (killFirst) await killExistingTradingView(platform);
+
+    const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], {detached: true, stdio: 'ignore'});
+    child.unref();
+
+    for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+            const ready = await fetchCdpVersion(cdpPort);
       if (ready) {
         const info = JSON.parse(ready);
         return {

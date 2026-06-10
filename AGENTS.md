@@ -70,17 +70,24 @@ assert(js.includes('"\\u0027); alert('));  // Verify it's escaped
 
 ## Binance module (separate integration — NOT CDP)
 
-`src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`, or `KNOWN_PATHS`. It is fully wired through all three layers (64 tools / 66 CLI subcommands):
+`src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`,
+or `KNOWN_PATHS`. It is fully wired through all three layers (68 tools / 70 CLI subcommands):
 
 - **Core:** `src/core/binance.js`
 - **MCP:** `src/tools/binance.js` — `registerBinanceTools(server)`, registered in `src/server.js`. (Binance **is** exposed over MCP.)
 - **CLI:** `src/cli/commands/binance.js` — `npm run tv -- binance <subcommand>`.
 
-**DI shape differs from the CDP modules:** instead of `{ evaluate, waitForChartReady }`, Binance functions take `_deps = { fetch, now, keys, sleep, testnet, paperTrading }`. Tests in `tests/binance.test.js` inject these (a mock `fetch`, fixed `now`, fake `keys`, a no-op `sleep`, optional `testnet`, and optional `paperTrading`) to assert on the exact requests built — **no network, no real keys**. Run `npm run test:binance` (203 tests).
+**DI shape differs from the CDP modules:** instead of `{ evaluate, waitForChartReady }`, Binance functions take
+`_deps = { fetch, now, keys, sleep, testnet, paperTrading }`. Tests are split across four files — `tests/binance-account.test.js`,
+`tests/binance-market.test.js`, `tests/binance-orders.test.js`, `tests/binance-tools.test.js` — with shared fixtures in `tests/_binance_helpers.js`. Each
+injects a mock `fetch`, fixed `now`, fake `keys`, a no-op `sleep`, optional `testnet`, and optional `paperTrading` to assert on the exact requests built — **no
+network, no real keys**. Run `npm run test:binance`.
 
 **Invariants every Binance contributor must preserve:**
 - **Credentials:** `BINANCE_API_KEY`/`BINANCE_API_SECRET` (account "1"), plus `_2`/`_3`… for more accounts, from the environment or a gitignored `.env` (minimal loader, never overwrites existing env vars). See `.env.example`.
-- **Per-account key routing:** every signed/account-specific function takes `account` and resolves keys via `resolveDeps(account, _deps)` before calling `signedRequest({ …, _deps: deps })`. Omitting `account` silently falls back to account 1 — a dangerous bug (acting on the wrong account). The `tests/binance.test.js` "account routing" suite guards this; CLI/MCP wrappers must forward `account`.
+- **Per-account key routing:** every signed/account-specific function takes `account` and resolves keys via `resolveDeps(account, _deps)` before calling
+  `signedRequest({ …, _deps: deps })`. Omitting `account` silently falls back to account 1 — a dangerous bug (acting on the wrong account). The
+  `tests/binance-account.test.js` "account routing" suite guards this; CLI/MCP wrappers must forward `account`.
 - **Dry-run by default:** all money-moving functions (`placeOrder`, `placeLadder`, `placeBracket`, `modifyOrder`, `ensureProtectiveStop`, `adjustIsolatedMargin`, `cancelAllOrders`, `mirrorOrder`, `mirrorBracket`, `transfer`) return a preview and send nothing unless `confirm: true`. Never auto-confirm.
 - **Post-only by default:** LIMIT → `GTX` (futures) / `LIMIT_MAKER` (spot); taker-only types require `allowTaker`.
 - **Hedge mode / precision / algo routing / clock-skew & 429-backoff:** see the "Binance module" section in `CLAUDE.md` for the full list — keep them intact.
@@ -88,7 +95,10 @@ assert(js.includes('"\\u0027); alert('));  // Verify it's escaped
 - **Global testnet switch:** when `BINANCE_TESTNET` is truthy (or `_deps.testnet` in tests), host routing and key resolution switch to testnet credentials/hosts automatically.
 - **Global paper-trading kill-switch:** when `PAPER_TRADING`/`BINANCE_PAPER_TRADING` is truthy (or `_deps.paperTrading` in tests), every money-moving function forces `confirm = false` at its top → returns its dry-run preview (flagged `paper_trading:true`) and sends NOTHING, even with `confirm:true`. Unlike testnet, it places nothing anywhere. Any NEW money-mover must add the same `usePaperTrading(_deps)` gate.
 
-When adding a Binance tool, follow the same 4-step checklist below but use the `{ fetch, now, keys, sleep, testnet, paperTrading }` DI shape and add the route/assertion to `tests/binance.test.js` (not `sanitization.test.js`, which is for CDP injection).
+When adding a Binance tool, follow the same 4-step checklist below but use the `{ fetch, now, keys, sleep, testnet, paperTrading }` DI shape and add the
+route/assertion to the appropriate `tests/binance-*.test.js` file (account reads → `binance-account.test.js`, market data/TA → `binance-market.test.js`,
+orders/money-movers → `binance-orders.test.js`, MCP tool wrappers → `binance-tools.test.js`). Use shared fixtures from `tests/_binance_helpers.js`. Do NOT add
+to `sanitization.test.js`, which is for CDP injection only.
 
 ## Core Module Patterns
 
@@ -196,7 +206,7 @@ register('my-command', {
 
 - **Unit test**: `src/core/myFunc` with mock `_deps` in `tests/sanitization.test.js` (verify JS expression strings)
 - **CLI test**: Router test in `tests/cli.test.js`
-- **E2E test**: Live TradingView in `tests/e2e.test.js` (requires `npm run test:e2e`)
+- **E2E test**: Live TradingView in `tests/e2e.live.js` (requires `npm run test:e2e`)
 
 ## Undocumented TradingView APIs (KNOWN_PATHS)
 
@@ -224,9 +234,15 @@ const KNOWN_PATHS = {
 
 ### Unit Tests (No TradingView Required)
 
-**Files**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/morning.test.js`, `tests/binance.test.js`, `tests/sanitization.test.js`, `tests/replay.test.js`, `tests/core_di.test.js`
+**Files**: `tests/pine_analyze.test.js`, `tests/cli.test.js`, `tests/morning.test.js`, `tests/sanitization.test.js`, `tests/replay.test.js`,
+`tests/core_di.test.js`, `tests/stream.test.js`, `tests/health.test.js`, `tests/binance-account.test.js`, `tests/binance-market.test.js`,
+`tests/binance-orders.test.js`, `tests/binance-tools.test.js`
 
 `tests/core_di.test.js` holds `_deps`-injected unit tests for the chart/indicators/watchlist/tab/pane/alerts/data modules — mock `evaluate`/`evaluateAsync`/`fetch` via `_deps` and assert on validation, response shaping, and `safeString()` use.
+
+`tests/stream.test.js` and `tests/health.test.js` use **`node:module registerHooks`** (synchronous, no flags) instead of `_deps` injection — these modules
+import `connection.js` directly and don't expose a `_deps` hook. The hook substitutes `connection.js` with a controllable fake before the module is loaded;
+`process.stdout`/`stderr` writes are captured by patching `.write` for the duration of each run.
 
 ```bash
 npm test            # the full offline suite (alias: npm run test:unit)
@@ -238,7 +254,7 @@ Run an individual suite:
 npm run test:sanitization   # node --test tests/sanitization.test.js
 npm run test:replay         # node --test tests/replay.test.js
 npm run test:core           # node --test tests/core_di.test.js
-npm run test:binance        # node --test tests/binance.test.js
+npm run test:binance        # node --test "tests/binance-*.test.js"
 ```
 
 Use `mockDeps()` to capture generated JS expressions:
@@ -251,7 +267,7 @@ assert(evaluate.calls[0].includes('setSymbol("AAPL")'));
 
 ### E2E Tests (Requires Live TradingView)
 
-**File**: `tests/e2e.test.js`
+**File**: `tests/e2e.live.js`
 
 ```bash
 # Start TradingView first with:

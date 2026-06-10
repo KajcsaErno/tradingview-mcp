@@ -1,7 +1,7 @@
 /**
  * Core data access logic.
  */
-import { evaluate as _evaluate, KNOWN_PATHS, safeString } from '../connection.js';
+import {evaluate as _evaluate, KNOWN_PATHS, safeString} from '../connection.js';
 
 function _resolve(deps) {
   return { evaluate: deps?.evaluate || _evaluate };
@@ -82,7 +82,12 @@ export async function getOhlcv({ count, summary, _deps } = {}) {
         return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
       })()
     `);
-  } catch { data = null; }
+  } catch (err) {
+      // Surface infrastructure failures directly — only swallow page-side evaluation
+      // misses (stale path, chart mid-load), which fall through to the generic error.
+      if (/CDP|connect|target|websocket/i.test(err?.message || '')) throw err;
+      data = null;
+  }
 
   if (!data || !data.bars || data.bars.length === 0) {
     throw new Error('Could not extract OHLCV data. The chart may still be loading.');
@@ -94,7 +99,7 @@ export async function getOhlcv({ count, summary, _deps } = {}) {
     const lows = bars.map(b => b.low);
     const volumes = bars.map(b => b.volume);
     const first = bars[0];
-    const last = bars[bars.length - 1];
+      const last = bars.at(-1);
     return {
       success: true, bar_count: bars.length,
       period: { from: first.time, to: last.time },
@@ -381,8 +386,8 @@ export async function getPineLines({ study_filter, verbose, _deps } = {}) {
     const allLines = [];
     for (const item of s.items) {
       const v = item.raw;
-      const y1 = v.y1 != null ? Math.round(v.y1 * 100) / 100 : null;
-      const y2 = v.y2 != null ? Math.round(v.y2 * 100) / 100 : null;
+        const y1 = v.y1 == null ? null : Math.round(v.y1 * 100) / 100;
+        const y2 = v.y2 == null ? null : Math.round(v.y2 * 100) / 100;
       if (verbose) allLines.push({ id: item.id, y1, y2, x1: v.x1, x2: v.x2, horizontal: v.y1 === v.y2, style: v.st, width: v.w, color: v.ci });
       if (y1 != null && v.y1 === v.y2 && !seen[y1]) { hLevels.push(y1); seen[y1] = true; }
     }
@@ -405,7 +410,7 @@ export async function getPineLabels({ study_filter, max_labels, verbose, _deps }
     let labels = s.items.map(item => {
       const v = item.raw;
       const text = v.t || '';
-      const price = v.y != null ? Math.round(v.y * 100) / 100 : null;
+        const price = v.y == null ? null : Math.round(v.y * 100) / 100;
       if (verbose) return { id: item.id, text, price, x: v.x, yloc: v.yl, size: v.sz, textColor: v.tci, color: v.ci };
       return { text, price };
     }).filter(l => l.text || l.price != null);
@@ -413,6 +418,12 @@ export async function getPineLabels({ study_filter, max_labels, verbose, _deps }
     return { name: s.name, total_labels: s.count, showing: labels.length, labels };
   });
   return { success: true, study_count: studies.length, studies };
+}
+
+// Joins one table row's cells (a {colNum: text} map) in column order.
+function formatTableRow(cols) {
+    const colNums = Object.keys(cols).map(Number).sort((a, b) => a - b);
+    return colNums.map(cn => cols[cn]).filter(Boolean).join(' | ');
 }
 
 export async function getPineTables({ study_filter, _deps } = {}) {
@@ -432,16 +443,21 @@ export async function getPineTables({ study_filter, _deps } = {}) {
     }
     const tableList = Object.entries(tables).map(([, rows]) => {
       const rowNums = Object.keys(rows).map(Number).sort((a, b) => a - b);
-      const formatted = rowNums.map(rn => {
-        const cols = rows[rn];
-        const colNums = Object.keys(cols).map(Number).sort((a, b) => a - b);
-        return colNums.map(cn => cols[cn]).filter(Boolean).join(' | ');
-      }).filter(Boolean);
+        const formatted = rowNums.map(rn => formatTableRow(rows[rn])).filter(Boolean);
       return { rows: formatted };
     });
     return { name: s.name, tables: tableList };
   });
   return { success: true, study_count: studies.length, studies };
+}
+
+// Rounded {high, low} bounds of one box's raw coords, or nulls when either edge is missing.
+function boxBounds(v) {
+    if (v.y1 == null || v.y2 == null) return {high: null, low: null};
+    return {
+        high: Math.round(Math.max(v.y1, v.y2) * 100) / 100,
+        low: Math.round(Math.min(v.y1, v.y2) * 100) / 100,
+    };
 }
 
 export async function getPineBoxes({ study_filter, verbose, _deps } = {}) {
@@ -456,8 +472,7 @@ export async function getPineBoxes({ study_filter, verbose, _deps } = {}) {
     const allBoxes = [];
     for (const item of s.items) {
       const v = item.raw;
-      const high = v.y1 != null && v.y2 != null ? Math.round(Math.max(v.y1, v.y2) * 100) / 100 : null;
-      const low = v.y1 != null && v.y2 != null ? Math.round(Math.min(v.y1, v.y2) * 100) / 100 : null;
+        const {high, low} = boxBounds(v);
       if (verbose) allBoxes.push({ id: item.id, high, low, x1: v.x1, x2: v.x2, borderColor: v.c, bgColor: v.bc });
       if (high != null && low != null) { const key = high + ':' + low; if (!seen[key]) { zones.push({ high, low }); seen[key] = true; } }
     }

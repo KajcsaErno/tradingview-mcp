@@ -8,3 +8,18 @@ export function jsonResult(obj, isError = false) {
     ...(isError && { isError: true }),
   };
 }
+
+/**
+ * Register an MCP tool with the standard try/catch → jsonResult boilerplate.
+ * `handler(args)` should return (or resolve to) the core result object;
+ * thrown errors become `{ success: false, error }` with the MCP isError flag.
+ */
+export function registerTool(server, name, description, schema, handler) {
+    server.tool(name, description, schema, async (args) => {
+        try {
+            return jsonResult(await handler(args));
+        } catch (err) {
+            return jsonResult({success: false, error: err.message}, true);
+        }
+    });
+}

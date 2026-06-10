@@ -19,7 +19,7 @@
  * - Capture (1 tool)
  */
 
-import { describe, it, before, after } from 'node:test';
+import {after, before, describe, it} from 'node:test';
 import assert from 'node:assert/strict';
 import CDP from 'chrome-remote-interface';
 
