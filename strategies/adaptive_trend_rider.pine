@@ -1,0 +1,128 @@
+//@version=6
+strategy("Adaptive Trend Rider [BTCUSDC]", shorttitle="ATR-Rider", overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2,
+     pyramiding=3,
+     calc_on_every_tick=false,
+     margin_long=100.0 / 3.0,
+     margin_short=100.0 / 3.0)
+
+// ── Inputs ──────────────────────────────────────────────────────────────────
+emaFastLen  = input.int(20,   "Fast EMA",                 minval=2,  group="Trend")
+emaSlowLen  = input.int(50,   "Slow EMA",                 minval=5,  group="Trend")
+emaTrendLen = input.int(200,  "Regime EMA filter",        minval=20, group="Trend")
+adxLen      = input.int(14,   "ADX length",               minval=2,  group="Filter")
+adxThresh   = input.float(25, "ADX threshold",            minval=5,  group="Filter")
+htfFilter   = input.bool(false,"Higher-timeframe trend filter (lags weeks — hurt the backtest, off by default)", group="Filter")
+htfTf       = input.timeframe("D", "HTF resolution",      group="Filter")
+kcMult      = input.float(2.0,"Keltner breakout mult",    step=0.1,  group="Entry")
+atrLen      = input.int(14,   "ATR length",               minval=2,  group="Risk")
+atrStopMult = input.float(2.5,"Initial stop (ATR mult)",  step=0.1,  group="Risk")
+trailMult   = input.float(4.0,"Chandelier trail (ATR mult)", step=0.1, group="Risk")
+chandLen    = input.int(50,   "Chandelier lookback",      minval=5,  group="Risk")
+useTrail    = input.bool(false,"Use chandelier trail (off = exit on trend flip + fixed stop)", group="Risk")
+riskPct     = input.float(2.25,"Risk per trade (% equity)", step=0.25, group="Risk")
+maxAdds     = input.int(3,    "Max entries per trend (1 = no pyramiding)", minval=1, maxval=3, group="Risk")
+maxLev      = input.float(3.0,"Max leverage cap",          step=0.5,  group="Risk")
+allowLong   = input.bool(true,  "Allow longs",  group="Direction")
+allowShort  = input.bool(false,  "Allow shorts", group="Direction")
+useDateFilter = input.bool(true, "Limit backtest range", group="Backtest")
+startDate     = input.time(timestamp("11 Jun 2020 00:00 +0000"), "Backtest start", group="Backtest")
+
+// ── Indicators ──────────────────────────────────────────────────────────────
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+atrVal   = ta.atr(atrLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+upperKC = emaFast + kcMult * atrVal
+lowerKC = emaFast - kcMult * atrVal
+
+trendUp     = emaFast > emaSlow and close > emaTrend
+trendDown   = emaFast < emaSlow and close < emaTrend
+strongTrend = adxVal > adxThresh
+
+// Higher-timeframe confluence (non-repainting: reads the previous COMPLETED HTF bar)
+[htfFast, htfSlow] = request.security(syminfo.tickerid, htfTf,
+     [ta.ema(close, emaFastLen)[1], ta.ema(close, emaSlowLen)[1]],
+     lookahead=barmerge.lookahead_on)
+htfUp   = not htfFilter or htfFast > htfSlow
+htfDown = not htfFilter or htfFast < htfSlow
+
+// Re-arm gate: after a trade, price must pull back to the fast EMA midline
+// before the next breakout counts — entries become "breakout after pullback",
+// not instant re-entry churn after a stop-out.
+var bool longArmed  = true
+var bool shortArmed = true
+if close < emaFast
+    longArmed := true
+if close > emaFast
+    shortArmed := true
+
+inRange     = not useDateFilter or time >= startDate
+longSignal  = allowLong  and inRange and trendUp   and strongTrend and htfUp   and close > upperKC and longArmed
+shortSignal = allowShort and inRange and trendDown and strongTrend and htfDown and close < lowerKC and shortArmed
+
+// ── Position sizing: risk a fixed % of equity per trade, capped at max leverage
+stopDist = atrStopMult * atrVal
+riskQty  = (strategy.equity * riskPct / 100.0) / stopDist
+capQty   = (strategy.equity * maxLev) / close
+qty      = math.min(riskQty, capQty)
+
+// ── Entries ─────────────────────────────────────────────────────────────────
+// Pyramiding: each add still needs a fresh pullback-to-EMA + breakout (re-arm gate),
+// and the stop ratchets to hang off the LATEST add — Turtle-style scale-in.
+canAddLong  = strategy.position_size > 0 and strategy.opentrades < maxAdds
+canAddShort = strategy.position_size < 0 and strategy.opentrades < maxAdds
+
+if longSignal and (strategy.position_size <= 0 or canAddLong)
+    strategy.entry("Long", strategy.long, qty=qty)
+    longArmed := false
+if shortSignal and (strategy.position_size >= 0 or canAddShort)
+    strategy.entry("Short", strategy.short, qty=qty)
+    shortArmed := false
+
+// ── Exits: initial ATR stop that ratchets into a chandelier trail ───────────
+var float longStop  = na
+var float shortStop = na
+
+chandLong  = ta.highest(high, chandLen) - trailMult * atrVal
+chandShort = ta.lowest(low, chandLen)  + trailMult * atrVal
+
+if strategy.position_size > 0
+    entryPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    initStop   = entryPrice - stopDist
+    longStop  := na(longStop) ? initStop : (useTrail ? math.max(longStop, chandLong) : longStop)
+    longStop  := math.max(longStop, initStop)
+    strategy.exit("Long stop", from_entry="Long", stop=longStop)
+else
+    longStop := na
+
+if strategy.position_size < 0
+    entryPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    initStop   = entryPrice + stopDist
+    shortStop := na(shortStop) ? initStop : (useTrail ? math.min(shortStop, chandShort) : shortStop)
+    shortStop := math.min(shortStop, initStop)
+    strategy.exit("Short stop", from_entry="Short", stop=shortStop)
+else
+    shortStop := na
+
+// Trend-flip exit: don't wait for the trail if the regime reverses
+flipDown = ta.crossunder(emaFast, emaSlow)
+flipUp   = ta.crossover(emaFast, emaSlow)
+if strategy.position_size > 0 and flipDown
+    strategy.close("Long", comment="Trend flip")
+if strategy.position_size < 0 and flipUp
+    strategy.close("Short", comment="Trend flip")
+
+// ── Plots ───────────────────────────────────────────────────────────────────
+plot(emaFast,  "Fast EMA",  color=color.new(color.orange, 0))
+plot(emaSlow,  "Slow EMA",  color=color.new(color.teal, 0))
+plot(emaTrend, "Regime EMA", color=color.new(color.gray, 40), linewidth=2)
+plot(strategy.position_size > 0 ? longStop : na,  "Long trail",  color=color.new(color.aqua, 0),    style=plot.style_linebr)
+plot(strategy.position_size < 0 ? shortStop : na, "Short trail", color=color.new(color.orange, 0),  style=plot.style_linebr)
