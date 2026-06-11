@@ -32,6 +32,9 @@ allowLong   = input.bool(true,  "Allow longs",  group="Direction")
 allowShort  = input.bool(false,  "Allow shorts", group="Direction")
 useDateFilter = input.bool(true, "Limit backtest range", group="Backtest")
 startDate     = input.time(timestamp("11 Jun 2020 00:00 +0000"), "Backtest start", group="Backtest")
+breakevenR  = input.float(2,  "Breakeven stop after N×R (0 = off)", step=0.5, group="Experiments")
+volFilter   = input.bool(false, "Volume confirmation (breakout vol > SMA20)", group="Experiments")
+adxRising   = input.bool(false, "Require ADX rising", group="Experiments")
 
 // ── Indicators ──────────────────────────────────────────────────────────────
 emaFast  = ta.ema(close, emaFastLen)
@@ -65,8 +68,11 @@ if close > emaFast
     shortArmed := true
 
 inRange     = not useDateFilter or time >= startDate
-longSignal  = allowLong  and inRange and trendUp   and strongTrend and htfUp   and close > upperKC and longArmed
-shortSignal = allowShort and inRange and trendDown and strongTrend and htfDown and close < lowerKC and shortArmed
+volSma      = ta.sma(volume, 20)
+volOk       = not volFilter or volume > volSma
+adxOk       = not adxRising or adxVal > adxVal[1]
+longSignal  = allowLong  and inRange and trendUp   and strongTrend and htfUp   and volOk and adxOk and close > upperKC and longArmed
+shortSignal = allowShort and inRange and trendDown and strongTrend and htfDown and volOk and adxOk and close < lowerKC and shortArmed
 
 // ── Position sizing: risk a fixed % of equity per trade, capped at max leverage
 stopDist = atrStopMult * atrVal
@@ -99,6 +105,8 @@ if strategy.position_size > 0
     initStop   = entryPrice - stopDist
     longStop  := na(longStop) ? initStop : (useTrail ? math.max(longStop, chandLong) : longStop)
     longStop  := math.max(longStop, initStop)
+    if breakevenR > 0 and high >= entryPrice + breakevenR * stopDist
+        longStop := math.max(longStop, entryPrice)
     strategy.exit("Long stop", from_entry="Long", stop=longStop)
 else
     longStop := na
@@ -108,6 +116,8 @@ if strategy.position_size < 0
     initStop   = entryPrice + stopDist
     shortStop := na(shortStop) ? initStop : (useTrail ? math.min(shortStop, chandShort) : shortStop)
     shortStop := math.min(shortStop, initStop)
+    if breakevenR > 0 and low <= entryPrice - breakevenR * stopDist
+        shortStop := math.min(shortStop, entryPrice)
     strategy.exit("Short stop", from_entry="Short", stop=shortStop)
 else
     shortStop := na
