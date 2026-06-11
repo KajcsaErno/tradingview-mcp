@@ -46,6 +46,20 @@ export function registerBinanceTools(server) {
     market, account,
     }, core.getRiskReport);
 
+    registerTool(server, 'binance_plan_grid', 'Plan (never place) a grid: N price levels evenly spaced across [lower, upper], per-level qty from totalNotional or totalQuantity, each level classified BUY/SELL around the current price, with grid economics (spacing %, profit per completed grid cycle net of 2× maker fee) and a 3x-rule check. Pure planner — no confirm parameter exists; execute levels post-only via binance_place_ladder / binance_place_order (binance-grid-trader skill).', {
+        market, symbol,
+        lower: z.coerce.number().describe('Bottom of the grid range'),
+        upper: z.coerce.number().describe('Top of the grid range'),
+        count: z.coerce.number().default(10).describe('Number of grid LEVELS (N levels = N−1 grid steps). Derive from spacing for BTCUSDC: 100/50/25 USD by range width.'),
+        totalNotional: z.coerce.number().optional().describe('Total $ across all levels (pass exactly one of totalNotional / totalQuantity)'),
+        totalQuantity: z.coerce.number().optional().describe('Total base quantity across all levels'),
+        mode: z.enum(['long', 'short', 'neutral']).default('long').describe('long: BUYs open/add, SELLs reduce. short: inverse. neutral: BUYs open LONG + SELLs open SHORT (Hedge Mode, futures only).'),
+        feePct: z.coerce.number().default(0).describe('Maker fee % per side (post-only default = 0)'),
+        leverage: z.coerce.number().default(3).describe('Leverage for the margin estimate (default 3)'),
+        round: z.boolean().default(true),
+        account,
+    }, core.planGrid);
+
   // ---- Trade-math planners (pure, no network, no account) ----
     registerTool(server, 'binance_calc_expectancy', 'Forward-looking expectancy from a win rate (%) and reward:risk ratio: expectancy in R (per unit risked), the break-even win rate (1/(1+rr), e.g. 33% for 2:1), and — if a risk budget is given — $/% per trade and the projected PnL over N trades (fixed-risk). Theory only: excludes commission/slippage/tax/compounding. Pure calc.', {
     winRate: z.coerce.number().describe('Win rate as a percent (e.g. 50 = 50%)'),

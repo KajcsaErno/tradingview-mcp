@@ -9,6 +9,12 @@ You are managing an **already-open** Binance futures position (no new entry). Fo
 
 > ⚠️ Real funds. DRY-RUN until explicit `confirm`. Standing rules: **3x max**, **USDC pairs (BTCUSDC)**. Default `account 1` unless told otherwise.
 
+## Step 0: Consult the playbook
+
+Read `strategies/playbook.md` (if present). Apply *Standing rules* and *Confirmed rules*
+to how you manage this position (e.g. a confirmed funding-bleed rule argues for tighter
+exits on multi-day holds); surface matching *Observations* for the user to weigh.
+
 ## Step 1: Assess the position
 
 - `binance_get_positions` — side, qty, entry, mark, uPnl, leverage.

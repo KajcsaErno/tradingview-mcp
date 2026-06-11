@@ -921,6 +921,160 @@ export async function placeLadder({
     return buildLadderResult({market, sym, account, sd, ps, rungs, plan, warnings, seedResult, stopResult, placed, errors});
 }
 
+/** Validate planGrid's inputs and resolve the normalized facts the planner needs. */
+function validateGridInputs({market, symbol, lower, upper, count, totalNotional, totalQuantity, mode, feePct, leverage}) {
+    if (!symbol) throw new Error('symbol is required');
+    const sym = String(symbol).toUpperCase();
+    const loN = requireFinite(lower, 'lower'), hiN = requireFinite(upper, 'upper');
+    if (loN >= hiN) throw new Error('lower must be < upper');
+    const n = Math.trunc(requireFinite(count, 'count'));
+    if (n < 2) throw new Error('count must be >= 2 (count is grid LEVELS — N levels make N−1 grid steps)');
+    if ((totalNotional == null) === (totalQuantity == null)) throw new Error('pass exactly one of totalNotional or totalQuantity');
+    const md = String(mode).toLowerCase();
+    if (!['long', 'short', 'neutral'].includes(md)) throw new Error('mode must be long, short, or neutral');
+    const futures = isFuturesLike(market);
+    if (md === 'neutral' && !futures) throw new Error('mode "neutral" (BUY levels open LONG + SELL levels open SHORT) is futures-only and needs Hedge Mode');
+    return {sym, loN, hiN, n, md, futures, fee: requireFinite(feePct, 'feePct'), lev: requireFinite(leverage, 'leverage')};
+}
+
+/** Best-effort current price (book mid) so grid levels can be classified around it. */
+async function fetchGridMid({market, sym, deps}) {
+    try {
+        const bt = await getBookTicker({market, symbol: sym, _deps: deps});
+        const bid = Number(bt.bidPrice), ask = Number(bt.askPrice);
+        if (Number.isFinite(bid) && Number.isFinite(ask)) return (bid + ask) / 2;
+    } catch { /* price unavailable — levels stay unclassified */
+    }
+    return undefined;
+}
+
+/** Classify one grid level around the current price: SKIP within half a step of it
+ *  (left open so the first fill starts the cycle), else BUY below / SELL above. */
+function classifyGridLevel({price, mid, step}) {
+    if (mid == null) return undefined;
+    if (Math.abs(price - mid) <= step / 2) return 'SKIP';
+    if (price < mid) return 'BUY';
+    return 'SELL';
+}
+
+/** Build the snapped grid levels, dropping any that floor below minQty. */
+function buildGridLevels({n, loN, step, perQty, perNotional, info, minQty, mid}) {
+    const levels = [];
+    let skipped = 0;
+    for (let i = 0; i < n; i++) {
+        let price = loN + step * i;
+        let qty = perQty == null ? perNotional / price : perQty;
+        if (info) {
+            price = snap(price, info.tickSize, 'round');
+            qty = snap(qty, info.stepSize, 'floor');
+        }
+        if (minQty && qty < minQty) {
+            skipped++;
+            continue;
+        }
+        const side = classifyGridLevel({price, mid, step});
+        levels.push({price, qty, ...(side ? {side} : {})});
+    }
+    if (levels.length < 2) throw new Error('fewer than 2 usable levels — every level floored below minQty; raise the size or lower count');
+    return {levels, skipped};
+}
+
+/** Grid economics: each completed cycle earns one grid step and pays the maker fee
+ *  twice (buy fill + sell fill) — the classic viability check is spacing% − 2×fee%. */
+function gridEconomics({levels, step, loN, hiN, fee}) {
+    const totQty = levels.reduce((s, l) => s + l.qty, 0);
+    const totNotional = levels.reduce((s, l) => s + l.qty * l.price, 0);
+    const avgQty = totQty / levels.length;
+    const midRange = (loN + hiN) / 2;
+    const spacingPct = (step / midRange) * 100;
+    const profitPerGridPct = spacingPct - 2 * fee;
+    const grossPerGridUsd = avgQty * step;
+    const netPerGridUsd = grossPerGridUsd - avgQty * midRange * 2 * (fee / 100);
+    return {totQty, totNotional, spacingPct, profitPerGridPct, grossPerGridUsd, netPerGridUsd};
+}
+
+/** Collect the plan's warnings: 3x rule, price outside/unknown, losing economics, dropped levels. */
+function gridWarnings({warnings, lev, mid, loN, hiN, spacingPct, profitPerGridPct, fee, skipped, minQty}) {
+    if (lev > 3) warnings.push(`leverage ${lev}x exceeds your 3x rule`);
+    if (mid != null && (mid < loN || mid > hiN)) warnings.push(`current price ${px(mid)} is OUTSIDE the grid range [${loN}, ${hiN}] — every level sits on one side; the grid cannot cycle until price re-enters the range`);
+    if (mid == null) warnings.push('current price unavailable — levels could not be classified BUY/SELL');
+    if (profitPerGridPct <= 0) warnings.push(`spacing ${spacingPct.toFixed(3)}% does not cover the ${(2 * fee)}% round-trip fee — every completed grid cycle would LOSE money`);
+    if (skipped) warnings.push(`${skipped} level(s) dropped below minQty ${minQty}`);
+    return warnings;
+}
+
+const GRID_MODE_NOTES = {
+    long: 'BUY levels open/add to a LONG; SELL levels REDUCE it (Hedge Mode: positionSide LONG on both sides). SELL levels can only rest once there is position to reduce.',
+    short: 'SELL levels open/add to a SHORT; BUY levels REDUCE it (Hedge Mode: positionSide SHORT on both sides). BUY levels can only rest once there is position to reduce.',
+    neutral: 'BUY levels open LONG, SELL levels open SHORT (Hedge Mode required) — two independent one-sided grids.',
+};
+
+/**
+ * Plan (but never place) a grid: `count` price levels evenly spaced across [lower, upper],
+ * per-level qty split from totalNotional or totalQuantity, each level classified BUY (below
+ * the current price) / SELL (above) / SKIP (too close — left open so the first fill starts
+ * the cycle), with the classic per-grid profit estimate (spacing% − 2×fee%). PURE PLANNER —
+ * there is no confirm parameter because nothing is ever sent; execution belongs to
+ * placeLadder/placeOrder (see the binance-grid-trader skill).
+ */
+export async function planGrid({
+                                   market = 'futures', symbol, lower, upper, count = 10,
+                                   totalNotional, totalQuantity, mode = 'long',
+                                   feePct = 0, leverage = 3,
+                                   round = true, account = '1', _deps = {},
+                               } = {}) {
+    const {sym, loN, hiN, n, md, futures, fee, lev} =
+        validateGridInputs({market, symbol, lower, upper, count, totalNotional, totalQuantity, mode, feePct, leverage});
+    const deps = resolveDeps(account, _deps);
+
+    let info = null;
+    if (round) {
+        try {
+            info = await getSymbolInfo({market, symbol: sym, _deps: deps});
+        } catch { /* plan without snapping */
+        }
+    }
+    const minQty = info ? Number(info.minQty) || 0 : 0;
+    const step = (hiN - loN) / (n - 1);
+    const perNotional = totalNotional == null ? null : Number(totalNotional) / n;
+    const perQty = totalQuantity == null ? null : Number(totalQuantity) / n;
+
+    const mid = await fetchGridMid({market, sym, deps});
+    const {levels, skipped} = buildGridLevels({n, loN, step, perQty, perNotional, info, minQty, mid});
+    const {totQty, totNotional, spacingPct, profitPerGridPct, grossPerGridUsd, netPerGridUsd} =
+        gridEconomics({levels, step, loN, hiN, fee});
+
+    const {impliedAccountLeverage, warnings} = futures
+        ? await ladderLeverageGuard({market, account, totNotional, deps})
+        : {impliedAccountLeverage: undefined, warnings: []};
+    gridWarnings({warnings, lev, mid, loN, hiN, spacingPct, profitPerGridPct, fee, skipped, minQty});
+
+    return {
+        success: true, market, symbol: sym, account, mode: md,
+        planner_only: true,
+        note: 'planGrid places NOTHING and has no confirm parameter — execute the levels post-only via placeLadder/placeOrder (see the binance-grid-trader skill).',
+        range: {lower: loN, upper: hiN},
+        levels: levels.length,
+        buyLevels: levels.filter((l) => l.side === 'BUY').length,
+        sellLevels: levels.filter((l) => l.side === 'SELL').length,
+        currentPrice: mid == null ? undefined : px(mid),
+        spacing: {absolute: px(step), pct: Number(spacingPct.toFixed(4))},
+        perLevel: perNotional == null ? `${perQty} ${sym}` : `~$${perNotional.toFixed(2)}`,
+        totalQuantity: Number(totQty.toFixed(8)), totalNotional: Number(totNotional.toFixed(2)),
+        requiredMargin: futures ? Number((totNotional / lev).toFixed(2)) : undefined,
+        leverage: lev, impliedAccountLeverage,
+        economics: {
+            feePctPerSide: fee,
+            profitPerGridPct: Number(profitPerGridPct.toFixed(4)),
+            grossPerGridUsd: Number(grossPerGridUsd.toFixed(2)),
+            netPerGridUsd: Number(netPerGridUsd.toFixed(2)),
+        },
+        modeNote: GRID_MODE_NOTES[md],
+        grid: levels,
+        ...(warnings.length ? {warnings} : {}),
+    };
+}
+
 /**
  * Idempotently ensure a protective closePosition stop exists for an open futures position.
  * If a closePosition STOP order is already resting, does nothing. Otherwise (and if a position

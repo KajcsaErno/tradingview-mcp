@@ -31,7 +31,7 @@ export {
 } from './binance/account.js';
 
 export {
-    calcPositionSize, getOrder, getOrderHistory,
+    calcPositionSize, planGrid, getOrder, getOrderHistory,
     placeOrder, placeBracket, placeLadder, modifyOrder, ensureProtectiveStop,
     cancelOrder, cancelAlgoOrder, cancelAllOrders,
     mirrorOrder, mirrorBracket,

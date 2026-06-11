@@ -9,6 +9,13 @@ You are bridging the two halves of this project: read the **live TradingView cha
 
 > ⚠️ Binance tools move **real funds** — DRY-RUN until explicit `confirm`. Standing rules: **3x max leverage**, **USDC pairs only (BTCUSDC)**. Note the chart symbol (often a reference feed like `BITSTAMP:BTCUSD`) may differ from the **traded contract** (`BTCUSDC` on Binance) — always execute on the Binance contract, and sanity-check prices against `binance_get_ticker`.
 
+## Step 0: Consult the playbook
+
+Read `strategies/playbook.md` (if present). Apply *Standing rules* and *Confirmed rules*
+to the plan you're about to build; mention any *Observation* that matches this setup
+(same symbol, hold style, or mistake pattern) so the user can weigh it. Don't block on
+Observations — they're candidates, not rules.
+
 ## Step 1: Read the chart setup
 
 - `chart_get_state` — current symbol, timeframe, indicators.
