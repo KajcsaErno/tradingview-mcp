@@ -271,6 +271,32 @@ export async function setMarginType({market = 'futures', symbol, marginType, acc
  * positionSide is required; one-way mode defaults to BOTH. Futures only (USD-M and COIN-M).
  * Idea borrowed from muvon/mcp-binance-futures.
  */
+function validateMarginAdjustment({market, symbol, direction, amount}) {
+    if (!isFuturesLike(market)) throw new Error('adjustIsolatedMargin is futures-only');
+    if (!symbol) throw new Error('symbol is required');
+    const dir = String(direction).toLowerCase();
+    if (!['add', 'remove'].includes(dir)) throw new Error("direction must be 'add' or 'remove'");
+    const amt = requireFinite(amount, 'amount');
+    if (amt <= 0) throw new Error('amount must be > 0');
+    return {dir, amt, sym: String(symbol).toUpperCase()};
+}
+
+function normalizePositionSide(positionSide) {
+    if (!positionSide) return null;
+    const ps = String(positionSide).toUpperCase();
+    if (!['LONG', 'SHORT', 'BOTH'].includes(ps)) throw new Error('positionSide must be LONG, SHORT, or BOTH');
+    return ps;
+}
+
+function marginDryRunMessage({paperTrading, dir, amt, sym, isLive}) {
+    const dirWord = dir === 'add' ? 'into' : 'out of';
+    if (paperTrading) {
+        return `PAPER TRADING — would ${dir} ${amt} ${dirWord} the ISOLATED ${sym} position; decision logged, nothing sent.`;
+    }
+    const envNote = isLive ? ' (real funds)' : ' (testnet)';
+    return `DRY RUN — no margin moved. Pass confirm:true to ${dir} ${amt} ${dirWord} the ISOLATED ${sym} position${envNote}.`;
+}
+
 export async function adjustIsolatedMargin({
                                                market = 'futures',
                                                symbol,
@@ -281,22 +307,15 @@ export async function adjustIsolatedMargin({
                                                confirm = false,
                                                _deps = {}
                                            } = {}) {
-    if (!isFuturesLike(market)) throw new Error('adjustIsolatedMargin is futures-only');
-    if (!symbol) throw new Error('symbol is required');
-    const dir = String(direction).toLowerCase();
-    if (!['add', 'remove'].includes(dir)) throw new Error("direction must be 'add' or 'remove'");
-    const amt = requireFinite(amount, 'amount');
-    if (amt <= 0) throw new Error('amount must be > 0');
+    const {dir, amt, sym} = validateMarginAdjustment({market, symbol, direction, amount});
     const deps = resolveDeps(account, _deps);
     const paperTrading = usePaperTrading(_deps);
     if (paperTrading) confirm = false; // global kill-switch
-    const sym = String(symbol).toUpperCase();
     const type = dir === 'add' ? 1 : 2; // Binance positionMargin `type`: 1 = add, 2 = remove
     const params = {symbol: sym, amount: String(amt), type: String(type)};
-    let ps = positionSide ? String(positionSide).toUpperCase() : null;
-    if (ps && !['LONG', 'SHORT', 'BOTH'].includes(ps)) throw new Error('positionSide must be LONG, SHORT, or BOTH');
+    const ps = normalizePositionSide(positionSide);
     // Hedge Mode needs an explicit LONG/SHORT — refuse to guess which position to fund.
-    if (!ps && confirm) {
+    if (ps === null && confirm) {
         const mode = await getPositionMode({market, _deps: deps});
         if (mode.hedgeMode) throw new Error('Account is in Hedge Mode — pass positionSide:"LONG" or "SHORT" (CLI --positionSide) so the margin change targets the right position.');
     }
@@ -306,9 +325,7 @@ export async function adjustIsolatedMargin({
     if (!confirm) {
         return {
             success: false, dry_run: true, market, account,
-            message: paperTrading
-                ? `PAPER TRADING — would ${dir} ${amt} ${dir === 'add' ? 'into' : 'out of'} the ISOLATED ${sym} position; decision logged, nothing sent.`
-                : `DRY RUN — no margin moved. Pass confirm:true to ${dir} ${amt} ${dir === 'add' ? 'into' : 'out of'} the ISOLATED ${sym} position${isLive ? ' (real funds)' : ' (testnet)'}.`,
+            message: marginDryRunMessage({paperTrading, dir, amt, sym, isLive}),
             ...paperFields(paperTrading),
             margin_preview: {market, endpoint, ...params, action: dir},
         };

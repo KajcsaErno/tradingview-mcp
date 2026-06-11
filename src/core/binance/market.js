@@ -136,7 +136,7 @@ const mapBook = (t) => {
     const spread = Number.isFinite(bid) && Number.isFinite(ask) ? ask - bid : undefined;
     return {
         symbol: t.symbol, bidPrice: t.bidPrice, bidQty: t.bidQty, askPrice: t.askPrice, askQty: t.askQty,
-        spread: spread !== undefined ? String(spread) : undefined,
+        spread: spread === undefined ? undefined : String(spread),
         spreadPct: spread !== undefined && bid ? `${(spread / bid * 100).toFixed(4)}%` : undefined,
     };
 };
@@ -180,12 +180,19 @@ export async function getBookTicker({market = 'futures', symbol, all = false, qu
     return {success: true, market, ...mapBook({...t, symbol: t.symbol || sym})};
 }
 
+// Parse a list given as an array or a non-empty CSV string; null when absent.
+const parseCsvList = (value) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string' && value) return value.split(',');
+    return null;
+};
+
 /** Trading-day price-change stats (spot-only `/api/v3/ticker/tradingDay`) — like 24hr but
  *  anchored to the exchange trading day in `timeZone` (default 0/UTC). One `symbol`, or a
  *  `symbols` list (array or CSV) to scan several at once. */
 export async function getTradingDayTicker({market = 'spot', symbol, symbols, timeZone, _deps = {}} = {}) {
     if (isFuturesLike(market)) throw new Error('tradingDay ticker is spot-only');
-    const list = Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : null);
+    const list = parseCsvList(symbols);
     const params = {};
     if (timeZone !== undefined) params.timeZone = String(timeZone);
     if (list && list.length) {
@@ -216,7 +223,7 @@ export async function getAvgPrice({market = 'spot', symbol, _deps = {}} = {}) {
 export async function getRollingWindowTicker({market = 'spot', symbol, symbols, windowSize = '1d', _deps = {}} = {}) {
     if (isFuturesLike(market)) throw new Error('rolling-window ticker is spot-only (use get24hrTicker for futures)');
     const win = String(windowSize);
-    const list = Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : null);
+    const list = parseCsvList(symbols);
     if (list && list.length) {
         const params = {symbols: JSON.stringify(list.map((s) => String(s).trim().toUpperCase())), windowSize: win};
         const data = await publicRequest({market, endpoint: '/api/v3/ticker', params, _deps});
@@ -230,7 +237,7 @@ export async function getRollingWindowTicker({market = 'spot', symbol, symbols, 
     return {success: true, market, windowSize: win, ...map24hr({...t, symbol: t.symbol || sym})};
 }
 
-const COMPARE_SORT_KEYS = ['priceChangePercent', 'priceChange', 'quoteVolume', 'volume', 'lastPrice'];
+const COMPARE_SORT_KEYS = new Set(['priceChangePercent', 'priceChange', 'quoteVolume', 'volume', 'lastPrice']);
 
 /** Compare several symbols side-by-side on 24-hour stats, ranked by one metric (public). Fetches
  *  each symbol's 24hr ticker (works on spot/futures/coinm), then returns a sorted, ranked table
@@ -238,10 +245,10 @@ const COMPARE_SORT_KEYS = ['priceChangePercent', 'priceChange', 'quoteVolume', '
  *  (default), priceChange, quoteVolume, volume, lastPrice (descending). Unknown sortBy falls back
  *  to priceChangePercent. */
 export async function compareSymbols({market = 'futures', symbols, sortBy = 'priceChangePercent', _deps = {}} = {}) {
-    const list = Array.isArray(symbols) ? symbols : (typeof symbols === 'string' && symbols ? symbols.split(',') : null);
+    const list = parseCsvList(symbols);
     const syms = [...new Set((list || []).map((s) => String(s).trim().toUpperCase()).filter(Boolean))];
     if (!syms.length) throw new Error('symbols is required (array or CSV, e.g. "BTCUSDC,ETHUSDC")');
-    const key = COMPARE_SORT_KEYS.includes(sortBy) ? sortBy : 'priceChangePercent';
+    const key = COMPARE_SORT_KEYS.has(sortBy) ? sortBy : 'priceChangePercent';
     const rows = await Promise.all(syms.map(async (sym) => {
         const t = await get24hrTicker({market, symbol: sym, _deps});
         return {
@@ -258,7 +265,7 @@ export async function compareSymbols({market = 'futures', symbols, sortBy = 'pri
     return {
         success: true, market, sortBy: key, count: rows.length,
         leader: rows[0] ? rows[0].symbol : undefined,
-        laggard: rows.length ? rows[rows.length - 1].symbol : undefined,
+        laggard: rows.length ? rows.at(-1).symbol : undefined,
         comparison: rows,
     };
 }
@@ -287,7 +294,7 @@ export async function getFundingRate({market = 'futures', symbol, history = fals
         success: true, market, symbol: t.symbol || sym,
         markPrice: t.markPrice, indexPrice: t.indexPrice,
         lastFundingRate: t.lastFundingRate,
-        lastFundingRatePct: t.lastFundingRate != null ? `${(Number(t.lastFundingRate) * 100).toFixed(4)}%` : undefined,
+        lastFundingRatePct: t.lastFundingRate == null ? undefined : `${(Number(t.lastFundingRate) * 100).toFixed(4)}%`,
         nextFundingTime: t.nextFundingTime, interestRate: t.interestRate,
     };
 }
@@ -336,6 +343,26 @@ export async function closeUserStream({market = 'futures', account = '1', listen
     return {success: true, market, account};
 }
 
+// Resolve the WebSocket constructor: injected via _deps for tests, else the runtime global.
+const resolveWS = (_deps) => {
+    if (_deps.WebSocket) return _deps.WebSocket;
+    return typeof WebSocket === 'undefined' ? null : WebSocket;
+};
+
+// Shared settle-once finisher for the bounded WS watchers (watchPrice / watchOrderFlow):
+// clear the timer, close the socket, then reject the error or resolve the summary.
+// `state` is the watcher's mutable {settled, timer, ws} bag.
+const wsFinisher = (state, clearTimer, resolve, reject, summarize) => (err) => {
+    if (state.settled) return;
+    state.settled = true;
+    if (state.timer) clearTimer(state.timer);
+    try {
+        state.ws && state.ws.close();
+    } catch { /* ignore */
+    }
+    if (err) reject(err); else resolve(summarize());
+};
+
 /** Watch a symbol's live trades over a public WebSocket for a bounded window, then return a
  *  compact summary (open/high/low/close + change, VWAP, volume, tick count). Public/unsigned —
  *  subscribes to the `<symbol>@aggTrade` stream (available on spot, USD-M and COIN-M). This is
@@ -350,7 +377,7 @@ export async function watchPrice({market = 'futures', symbol, durationSec = 10, 
     const dur = Math.max(1, Math.min(Number(durationSec) || 10, 60));
     const base = WS_BASES[resolveMarket(market, _deps)];
     if (!base) throw new Error(`unknown market ${market}`);
-    const WS = _deps.WebSocket || (typeof WebSocket !== 'undefined' ? WebSocket : null);
+    const WS = resolveWS(_deps);
     if (!WS) throw new Error('WebSocket is not available in this runtime');
     const setTimer = _deps.setTimeout || setTimeout;
     const clearTimer = _deps.clearTimeout || clearTimeout;
@@ -358,7 +385,7 @@ export async function watchPrice({market = 'futures', symbol, durationSec = 10, 
 
     return new Promise((resolve, reject) => {
         const ticks = [];
-        let settled = false, timer = null, ws;
+        const state = {settled: false, timer: null, ws: undefined};
 
         const summarize = () => {
             const n = ticks.length;
@@ -386,24 +413,15 @@ export async function watchPrice({market = 'futures', symbol, durationSec = 10, 
             };
         };
 
-        const finish = (err) => {
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimer(timer);
-            try {
-                ws && ws.close();
-            } catch { /* ignore */
-            }
-            if (err) reject(err); else resolve(summarize());
-        };
+        const finish = wsFinisher(state, clearTimer, resolve, reject, summarize);
 
         try {
-            ws = new WS(wsUrl);
-        } catch (e) {
-            return finish(e);
+            state.ws = new WS(wsUrl);
+        } catch (err) {
+            return finish(err);
         }
-        timer = setTimer(() => finish(), dur * 1000);
-        ws.addEventListener('message', (ev) => {
+        state.timer = setTimer(() => finish(), dur * 1000);
+        state.ws.addEventListener('message', (ev) => {
             let m;
             try {
                 m = JSON.parse(ev.data);
@@ -413,14 +431,57 @@ export async function watchPrice({market = 'futures', symbol, durationSec = 10, 
             const price = Number(m.p), qty = Number(m.q);
             if (Number.isFinite(price)) ticks.push({price, qty: Number.isFinite(qty) ? qty : 0, time: m.T});
         });
-        ws.addEventListener('error', () => { /* a close event follows; we summarize there */
+        state.ws.addEventListener('error', () => { /* a close event follows; we summarize there */
         });
-        ws.addEventListener('close', () => finish());
+        state.ws.addEventListener('close', () => finish());
     });
 }
 
 // Supported partial-book depth sizes on Binance streams.
-const ORDER_FLOW_DEPTH_LEVELS = [5, 10, 20];
+const ORDER_FLOW_DEPTH_LEVELS = new Set([5, 10, 20]);
+
+// Snap a requested depth-levels value to a supported partial-book stream size.
+const snapDepthLevels = (lvNum) => {
+    if (ORDER_FLOW_DEPTH_LEVELS.has(lvNum)) return lvNum;
+    if (lvNum <= 5) return 5;
+    if (lvNum <= 10) return 10;
+    return 20;
+};
+
+// Resolve top-of-book from the bookTicker snapshot, falling back to the depth snapshot,
+// with the computed spread (absolute + bps).
+const orderFlowTopOfBook = (top, depth) => {
+    const bid = Number.isFinite(top.bid) ? top.bid : (depth.bids[0]?.price);
+    const ask = Number.isFinite(top.ask) ? top.ask : (depth.asks[0]?.price);
+    const spread = Number.isFinite(bid) && Number.isFinite(ask) ? ask - bid : undefined;
+    return {
+        bid: Number.isFinite(bid) ? bid : undefined,
+        ask: Number.isFinite(ask) ? ask : undefined,
+        spread: Number.isFinite(spread) ? Number(spread.toFixed(8)) : undefined,
+        spreadBps: Number.isFinite(spread) && bid ? Number(((spread / bid) * 10000).toFixed(2)) : undefined,
+        bidQty: Number.isFinite(top.bidQty) ? top.bidQty : undefined,
+        askQty: Number.isFinite(top.askQty) ? top.askQty : undefined,
+    };
+};
+
+// Largest resting level (by qty) on one side of the depth snapshot.
+const largestWall = (rows) => rows.reduce((best, x) => (x.qty > (best?.qty || 0) ? x : best), null);
+
+// Notional bid-vs-ask imbalance over the captured depth snapshot.
+const orderFlowDepthImbalance = (depth) => {
+    const bidNotional = depth.bids.reduce((s0, x) => s0 + (x.price * x.qty), 0);
+    const askNotional = depth.asks.reduce((s0, x) => s0 + (x.price * x.qty), 0);
+    const depthSum = bidNotional + askNotional;
+    const imbalance = depthSum > 0 ? (bidNotional - askNotional) / depthSum : undefined;
+    return {
+        bidNotional: Number(bidNotional.toFixed(2)),
+        askNotional: Number(askNotional.toFixed(2)),
+        imbalance: imbalance == null ? undefined : Number(imbalance.toFixed(4)),
+        imbalancePct: imbalance == null ? undefined : `${(imbalance * 100).toFixed(2)}%`,
+        largestBidWall: largestWall(depth.bids),
+        largestAskWall: largestWall(depth.asks),
+    };
+};
 
 /** Watch real-time order flow over a bounded window and return a compact microstructure read:
  *  aggressive buy/sell delta from aggTrades, top-of-book spread, and depth imbalance from a
@@ -431,12 +492,10 @@ export async function watchOrderFlow({market = 'futures', symbol, durationSec = 
     const sym = String(symbol).toUpperCase();
     const dur = Math.max(1, Math.min(Number(durationSec) || 10, 60));
     const lvNum = requireFinite(levels, 'levels');
-    const lv = ORDER_FLOW_DEPTH_LEVELS.includes(lvNum)
-        ? lvNum
-        : (lvNum <= 5 ? 5 : lvNum <= 10 ? 10 : 20);
+    const lv = snapDepthLevels(lvNum);
     const base = WS_BASES[resolveMarket(market, _deps)];
     if (!base) throw new Error(`unknown market ${market}`);
-    const WS = _deps.WebSocket || (typeof WebSocket !== 'undefined' ? WebSocket : null);
+    const WS = resolveWS(_deps);
     if (!WS) throw new Error('WebSocket is not available in this runtime');
     const setTimer = _deps.setTimeout || setTimeout;
     const clearTimer = _deps.clearTimeout || clearTimeout;
@@ -448,7 +507,7 @@ export async function watchOrderFlow({market = 'futures', symbol, durationSec = 
     const wsUrl = `${base}/stream?streams=${s}@trade/${s}@depth${lv}@100ms/${s}@bookTicker`;
 
     return new Promise((resolve, reject) => {
-        let settled = false, timer = null, ws;
+        const state = {settled: false, timer: null, ws: undefined};
         const agg = {count: 0, buyQty: 0, sellQty: 0, buyNotional: 0, sellNotional: 0, firstTradeTime: undefined, lastTradeTime: undefined};
         let top = {bid: undefined, ask: undefined, bidQty: undefined, askQty: undefined, time: undefined};
         let depth = {bids: [], asks: [], time: undefined};
@@ -463,17 +522,7 @@ export async function watchOrderFlow({market = 'futures', symbol, durationSec = 
             const deltaQty = agg.buyQty - agg.sellQty;
             const totalNotional = agg.buyNotional + agg.sellNotional;
             const deltaNotional = agg.buyNotional - agg.sellNotional;
-
-            const bid = Number.isFinite(top.bid) ? top.bid : (depth.bids[0]?.price);
-            const ask = Number.isFinite(top.ask) ? top.ask : (depth.asks[0]?.price);
-            const spread = Number.isFinite(bid) && Number.isFinite(ask) ? ask - bid : undefined;
-
-            const bidNotional = depth.bids.reduce((s0, x) => s0 + (x.price * x.qty), 0);
-            const askNotional = depth.asks.reduce((s0, x) => s0 + (x.price * x.qty), 0);
-            const depthSum = bidNotional + askNotional;
-            const imbalance = depthSum > 0 ? (bidNotional - askNotional) / depthSum : undefined;
-            const largestBidWall = depth.bids.reduce((best, x) => (x.qty > (best?.qty || 0) ? x : best), null);
-            const largestAskWall = depth.asks.reduce((best, x) => (x.qty > (best?.qty || 0) ? x : best), null);
+            const noEvents = agg.count === 0 && depth.bids.length === 0 && depth.asks.length === 0;
 
             return {
                 success: true, market, symbol: sym, durationSec: dur, levels: lv,
@@ -486,48 +535,25 @@ export async function watchOrderFlow({market = 'futures', symbol, durationSec = 
                 aggressiveSellNotional: Number(agg.sellNotional.toFixed(2)),
                 deltaNotional: Number(deltaNotional.toFixed(2)),
                 vwap: totalQty > 0 ? Number((totalNotional / totalQty).toFixed(8)) : undefined,
-                topOfBook: {
-                    bid: Number.isFinite(bid) ? bid : undefined,
-                    ask: Number.isFinite(ask) ? ask : undefined,
-                    spread: Number.isFinite(spread) ? Number(spread.toFixed(8)) : undefined,
-                    spreadBps: Number.isFinite(spread) && bid ? Number(((spread / bid) * 10000).toFixed(2)) : undefined,
-                    bidQty: Number.isFinite(top.bidQty) ? top.bidQty : undefined,
-                    askQty: Number.isFinite(top.askQty) ? top.askQty : undefined,
-                },
-                depthImbalance: {
-                    bidNotional: Number(bidNotional.toFixed(2)),
-                    askNotional: Number(askNotional.toFixed(2)),
-                    imbalance: imbalance != null ? Number(imbalance.toFixed(4)) : undefined,
-                    imbalancePct: imbalance != null ? `${(imbalance * 100).toFixed(2)}%` : undefined,
-                    largestBidWall,
-                    largestAskWall,
-                },
+                topOfBook: orderFlowTopOfBook(top, depth),
+                depthImbalance: orderFlowDepthImbalance(depth),
                 firstTradeTime: agg.firstTradeTime,
                 lastTradeTime: agg.lastTradeTime,
-                note: agg.count === 0 && depth.bids.length === 0 && depth.asks.length === 0
+                note: noEvents
                     ? 'No trade/depth events observed in the window (illiquid pair, wrong symbol/market, or window too short).'
                     : undefined,
             };
         };
 
-        const finish = (err) => {
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimer(timer);
-            try {
-                ws && ws.close();
-            } catch { /* ignore */
-            }
-            if (err) reject(err); else resolve(summarize());
-        };
+        const finish = wsFinisher(state, clearTimer, resolve, reject, summarize);
 
         try {
-            ws = new WS(wsUrl);
-        } catch (e) {
-            return finish(e);
+            state.ws = new WS(wsUrl);
+        } catch (err) {
+            return finish(err);
         }
-        timer = setTimer(() => finish(), dur * 1000);
-        ws.addEventListener('message', (ev) => {
+        state.timer = setTimer(() => finish(), dur * 1000);
+        state.ws.addEventListener('message', (ev) => {
             let m;
             try {
                 m = JSON.parse(ev.data);
@@ -564,11 +590,19 @@ export async function watchOrderFlow({market = 'futures', symbol, durationSec = 
                 };
             }
         });
-        ws.addEventListener('error', () => { /* a close event follows; summarize there */
+        state.ws.addEventListener('error', () => { /* a close event follows; summarize there */
         });
-        ws.addEventListener('close', () => finish());
+        state.ws.addEventListener('close', () => finish());
     });
 }
+
+// Tag a bar's flow by the aggressive-buy share of its quote volume.
+const footprintFlowTag = (buyShare) => {
+    if (buyShare == null) return 'no_flow';
+    if (buyShare >= 0.55) return 'buyers_in_control';
+    if (buyShare <= 0.45) return 'sellers_in_control';
+    return 'balanced';
+};
 
 /** Footprint-style per-candle aggression read from Binance kline order-flow fields. Each bar
  *  estimates aggressive buy/sell quote flow using takerBuyQuoteVolume vs total quoteVolume. */
@@ -591,9 +625,9 @@ export async function getFootprintBars({market = 'futures', symbol, interval = '
             aggressiveBuyQuote: Number(buyQuote.toFixed(2)),
             aggressiveSellQuote: Number(sellQuote.toFixed(2)),
             deltaQuote: Number(delta.toFixed(2)),
-            buyShare: buyShare != null ? Number((buyShare * 100).toFixed(2)) : undefined,
-            sellShare: sellShare != null ? Number((sellShare * 100).toFixed(2)) : undefined,
-            flowTag: buyShare == null ? 'no_flow' : buyShare >= 0.55 ? 'buyers_in_control' : buyShare <= 0.45 ? 'sellers_in_control' : 'balanced',
+            buyShare: buyShare == null ? undefined : Number((buyShare * 100).toFixed(2)),
+            sellShare: sellShare == null ? undefined : Number((sellShare * 100).toFixed(2)),
+            flowTag: footprintFlowTag(buyShare),
         };
     });
     const totalBuy = bars.reduce((s0, b) => s0 + b.aggressiveBuyQuote, 0);
@@ -618,7 +652,8 @@ const OPTIONS_BASE = 'https://eapi.binance.com';
 async function optionsPublicRequest({endpoint, params = {}, _deps = {}} = {}) {
     const fetchFn = _deps.fetch || fetch;
     const query = new URLSearchParams(params).toString();
-    const url = `${OPTIONS_BASE}${endpoint}${query ? `?${query}` : ''}`;
+    const qs = query ? `?${query}` : '';
+    const url = `${OPTIONS_BASE}${endpoint}${qs}`;
     const res = await fetchFn(url);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(`Binance options ${res.status}: ${data?.msg || JSON.stringify(data)}`);
@@ -634,29 +669,9 @@ const toExpCode = (ms) => {
     return `${y}${m}${day}`;
 };
 
-/**
- * Options IV/skew snapshot (public): builds an implied-vol surface from Binance Options mark data,
- * then reports per-expiry term structure and simple call-vs-put skew around ATM.
- */
-export async function getOptionsSurface({underlying = 'BTCUSDT', expirations, full = false, _deps = {}} = {}) {
-    const u = String(underlying || '').trim().toUpperCase();
-    if (!u) throw new Error('underlying is required (e.g. BTCUSDT)');
-    const expFilter = new Set(
-        (Array.isArray(expirations) ? expirations : (typeof expirations === 'string' ? expirations.split(',') : []))
-            .map((x) => String(x).trim())
-            .filter(Boolean),
-    );
-
-    const [info, marks, idx] = await Promise.all([
-        optionsPublicRequest({endpoint: '/eapi/v1/exchangeInfo', _deps}),
-        optionsPublicRequest({endpoint: '/eapi/v1/mark', params: {underlying: u}, _deps}),
-        optionsPublicRequest({endpoint: '/eapi/v1/index', params: {underlying: u}, _deps}).catch(() => null),
-    ]);
-
-    const indexPrice = Number(idx?.indexPrice);
-    const symbols = (info?.optionSymbols || []).filter((s) => String(s.underlying || '').toUpperCase() === u);
-    const markBySymbol = new Map((Array.isArray(marks) ? marks : []).map((m) => [String(m.symbol), m]));
-
+// Join exchangeInfo option symbols with their mark rows into flat per-contract rows,
+// keeping only the requested expirations (when a filter is given).
+const buildOptionRows = (symbols, markBySymbol, expFilter) => {
     const rows = [];
     for (const s of symbols) {
         const expiry = toExpCode(s.expiryDate);
@@ -678,7 +693,11 @@ export async function getOptionsSurface({underlying = 'BTCUSDT', expirations, fu
             markPrice: Number(m.markPrice),
         });
     }
+    return rows;
+};
 
+// Group contract rows by expiry, collecting mark IVs and a strike → {CALL, PUT} pair map.
+const groupOptionRowsByExpiry = (rows) => {
     const byExpiry = new Map();
     for (const r of rows) {
         if (!Number.isFinite(r.markIV)) continue;
@@ -690,32 +709,61 @@ export async function getOptionsSurface({underlying = 'BTCUSDT', expirations, fu
         g.strikes.set(r.strike, pair);
         byExpiry.set(k, g);
     }
+    return byExpiry;
+};
+
+// ATM call-vs-put IV snapshot for one expiry group: the strike nearest the index price.
+const optionAtmSkew = (g, indexPrice) => {
+    if (!Number.isFinite(indexPrice) || !g.strikes.size) return null;
+    const bestStrike = [...g.strikes.keys()].reduce((best, st) => (
+        best == null || Math.abs(st - indexPrice) < Math.abs(best - indexPrice) ? st : best
+    ), null);
+    const p = g.strikes.get(bestStrike) || {};
+    if (!p.CALL && !p.PUT) return null;
+    const callIv = Number.isFinite(p.CALL?.markIV) ? p.CALL.markIV : null;
+    const putIv = Number.isFinite(p.PUT?.markIV) ? p.PUT.markIV : null;
+    return {
+        strike: bestStrike,
+        callIv,
+        putIv,
+        callPutSkew: (callIv != null && putIv != null) ? Number((callIv - putIv).toFixed(6)) : null,
+    };
+};
+
+/**
+ * Options IV/skew snapshot (public): builds an implied-vol surface from Binance Options mark data,
+ * then reports per-expiry term structure and simple call-vs-put skew around ATM.
+ */
+export async function getOptionsSurface({underlying = 'BTCUSDT', expirations, full = false, _deps = {}} = {}) {
+    const u = String(underlying || '').trim().toUpperCase();
+    if (!u) throw new Error('underlying is required (e.g. BTCUSDT)');
+    const expFilter = new Set(
+        (parseCsvList(expirations) || [])
+            .map((x) => String(x).trim())
+            .filter(Boolean),
+    );
+
+    const [info, marks, idx] = await Promise.all([
+        optionsPublicRequest({endpoint: '/eapi/v1/exchangeInfo', _deps}),
+        optionsPublicRequest({endpoint: '/eapi/v1/mark', params: {underlying: u}, _deps}),
+        optionsPublicRequest({endpoint: '/eapi/v1/index', params: {underlying: u}, _deps}).catch(() => null),
+    ]);
+
+    const indexPrice = Number(idx?.indexPrice);
+    const symbols = (info?.optionSymbols || []).filter((s) => String(s.underlying || '').toUpperCase() === u);
+    const markBySymbol = new Map((Array.isArray(marks) ? marks : []).map((m) => [String(m.symbol), m]));
+
+    const rows = buildOptionRows(symbols, markBySymbol, expFilter);
+    const byExpiry = groupOptionRowsByExpiry(rows);
 
     const expiries = [];
     for (const [expiry, g] of [...byExpiry.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
         const avgIv = g.ivs.length ? (g.ivs.reduce((s0, x) => s0 + x, 0) / g.ivs.length) : null;
-        let atm = null;
-        if (Number.isFinite(indexPrice) && g.strikes.size) {
-            const bestStrike = [...g.strikes.keys()].reduce((best, st) => (
-                best == null || Math.abs(st - indexPrice) < Math.abs(best - indexPrice) ? st : best
-            ), null);
-            const p = g.strikes.get(bestStrike) || {};
-            if (p.CALL || p.PUT) {
-                const callIv = Number.isFinite(p.CALL?.markIV) ? p.CALL.markIV : null;
-                const putIv = Number.isFinite(p.PUT?.markIV) ? p.PUT.markIV : null;
-                atm = {
-                    strike: bestStrike,
-                    callIv,
-                    putIv,
-                    callPutSkew: (callIv != null && putIv != null) ? Number((callIv - putIv).toFixed(6)) : null,
-                };
-            }
-        }
         expiries.push({
             expiry,
             contracts: g.ivs.length,
-            avgMarkIv: avgIv != null ? Number(avgIv.toFixed(6)) : null,
-            atm,
+            avgMarkIv: avgIv == null ? null : Number(avgIv.toFixed(6)),
+            atm: optionAtmSkew(g, indexPrice),
         });
     }
 
@@ -776,7 +824,7 @@ export function buildMarketStream({market = 'futures', symbols, streams = 'trade
     const m = resolveMarket(market, _deps);
     const base = WS_BASES[m];
     if (!base) throw new Error(`unknown market ${market}`);
-    const symList = [...new Set((Array.isArray(symbols) ? symbols : (typeof symbols === 'string' ? symbols.split(',') : []))
+    const symList = [...new Set((parseCsvList(symbols) || [])
         .map((s) => String(s).trim().toUpperCase()).filter(Boolean))];
     if (!symList.length) throw new Error('symbols is required (array or CSV, e.g. "BTCUSDC,ETHUSDC")');
     const streamList = (Array.isArray(streams) ? streams : String(streams).split(','))

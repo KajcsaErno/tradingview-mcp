@@ -1449,6 +1449,94 @@ export async function detectCandlestickPatterns({market = 'futures', symbol, int
 
 const clamp1 = (x) => Math.max(-1, Math.min(1, x));
 
+// -1/0/+1 comparison sign (above / equal / below).
+const cmpSign = (a, b) => {
+    if (a > b) return 1;
+    if (a < b) return -1;
+    return 0;
+};
+
+// Pick the bullish or bearish wording by the sign of a score (>= 0 → bullish wording).
+const pickBySign = (s, positive, negative) => (s >= 0 ? positive : negative);
+
+// Append a factor, skipping unavailable (null/non-finite) scores.
+const addFactor = (factors, name, score, weight, label) => {
+    if (score == null || !Number.isFinite(score)) return;
+    factors.push({name, score: clamp1(score), weight, label});
+};
+
+// Build the weighted trend-following factor set off a getTechnicals result (all factors share
+// the same +bullish / -bearish convention so they don't contradict each other).
+function collectSignalFactors(tech) {
+    const c = tech.lastClose;
+    const factors = [];
+    if (tech.sma?.['200'] != null && c != null) {
+        const s = cmpSign(c, tech.sma['200']);
+        addFactor(factors, 'trend_sma200', s, 1, `price ${pickBySign(s, 'above', 'below')} SMA200 — ${pickBySign(s, 'bullish', 'bearish')} long-term trend`);
+    }
+    if (tech.ema?.['50'] != null && c != null) {
+        const s = cmpSign(c, tech.ema['50']);
+        addFactor(factors, 'trend_ema50', s, 0.7, `price ${pickBySign(s, 'above', 'below')} EMA50 — ${pickBySign(s, 'bullish', 'bearish')} mid-term trend`);
+    }
+    if (tech.macd?.hist != null) {
+        const s = cmpSign(tech.macd.hist, 0);
+        addFactor(factors, 'macd_hist', s, 0.8, `MACD histogram ${pickBySign(s, 'positive', 'negative')} — momentum ${pickBySign(s, 'up', 'down')}`);
+    }
+    if (tech.rsi != null) {
+        addFactor(factors, 'rsi_momentum', clamp1((tech.rsi - 50) / 20), 0.6, `RSI ${tech.rsi} — momentum ${pickBySign(tech.rsi - 50, 'up', 'down')}`);
+    }
+    if (tech.vwap != null && c != null) {
+        const s = cmpSign(c, tech.vwap);
+        addFactor(factors, 'vs_vwap', s, 0.5, `price ${pickBySign(s, 'above', 'below')} VWAP`);
+    }
+    if (tech.bollinger?.upper != null && tech.bollinger.lower != null && c != null) {
+        const span = tech.bollinger.upper - tech.bollinger.lower;
+        if (span > 0) {
+            const pctB = (c - tech.bollinger.lower) / span; // 0 = lower band, 1 = upper band
+            addFactor(factors, 'bollinger_pctb', clamp1((pctB - 0.5) * 2), 0.4, `Bollinger %B ${(pctB * 100).toFixed(0)}% — ${pickBySign(pctB - 0.5, 'upper', 'lower')} half of the band`);
+        }
+    }
+    return factors;
+}
+
+// Cautions dampen confidence but never flip the verdict.
+function buildSignalCautions(tech, factors) {
+    const cautions = [];
+    if (tech.rsi != null && tech.rsi >= 70) cautions.push(`RSI ${tech.rsi} overbought — pullback risk on longs`);
+    if (tech.rsi != null && tech.rsi <= 30) cautions.push(`RSI ${tech.rsi} oversold — bounce risk on shorts`);
+    if (tech.bollinger?.widthPct != null && tech.bollinger.widthPct < 2) cautions.push(`Bollinger bands narrow (${tech.bollinger.widthPct}%) — low volatility, breakout pending`);
+    if (factors.length < 4) cautions.push(`only ${factors.length} indicators available (too few bars?) — signal is low-confidence`);
+    return cautions;
+}
+
+// Map the weighted score + factor agreement (+ any cautions) onto signal/strength/confidence.
+function signalVerdict(score, agreement, cautions) {
+    const abs = Math.abs(score);
+    let signal = 'HOLD';
+    if (score >= 0.3) signal = 'BUY';
+    if (score <= -0.3) signal = 'SELL';
+    let strength = 'weak';
+    if (abs >= 0.6) strength = 'strong';
+    else if (abs >= 0.3) strength = 'moderate';
+    // Confidence blends magnitude + agreement, knocked down a notch when a caution is in play.
+    let confidence = 'low';
+    if (abs >= 0.5 && agreement >= 0.7) confidence = 'high';
+    else if (abs >= 0.3 && agreement >= 0.55) confidence = 'moderate';
+    if (confidence === 'high' && cautions.length) confidence = 'moderate';
+    return {signal, strength, confidence};
+}
+
+// Compact echo of the headline technicals behind a signal.
+const signalTechnicals = (tech) => ({
+    rsi: tech.rsi,
+    macdHist: tech.macd?.hist ?? null,
+    sma200: tech.sma?.['200'] ?? null,
+    ema50: tech.ema?.['50'] ?? null,
+    vwap: tech.vwap,
+    trend: tech.classification.trend,
+    momentum: tech.classification.momentum
+});
+
 /**
  * Composite BUY/SELL/HOLD signal for a symbol, scored off getTechnicals: price vs SMA200 (long
  * trend) and EMA50 (mid trend), MACD histogram, RSI momentum, price vs VWAP, and Bollinger %B —
@@ -1460,48 +1548,17 @@ const clamp1 = (x) => Math.max(-1, Math.min(1, x));
  */
 export async function getSignal({market = 'futures', symbol, interval = '1h', limit, mtf = false, _deps = {}} = {}) {
     if (!symbol) throw new Error('symbol is required');
-    const tech = await getTechnicals({market, symbol, interval, ...(limit != null ? {limit} : {}), _deps});
+    const tech = await getTechnicals({market, symbol, interval, ...(limit == null ? {} : {limit}), _deps});
     const c = tech.lastClose;
-    const factors = [];
-    const add = (name, score, weight, label) => {
-        if (score == null || !Number.isFinite(score)) return;
-        factors.push({name, score: clamp1(score), weight, label});
-    };
-
     // Trend-following factor set (all share the same +bullish / -bearish convention).
-    if (tech.sma?.['200'] != null && c != null) {
-        const s = c > tech.sma['200'] ? 1 : c < tech.sma['200'] ? -1 : 0;
-        add('trend_sma200', s, 1.0, `price ${s >= 0 ? 'above' : 'below'} SMA200 — ${s >= 0 ? 'bullish' : 'bearish'} long-term trend`);
-    }
-    if (tech.ema?.['50'] != null && c != null) {
-        const s = c > tech.ema['50'] ? 1 : c < tech.ema['50'] ? -1 : 0;
-        add('trend_ema50', s, 0.7, `price ${s >= 0 ? 'above' : 'below'} EMA50 — ${s >= 0 ? 'bullish' : 'bearish'} mid-term trend`);
-    }
-    if (tech.macd?.hist != null) {
-        const s = tech.macd.hist > 0 ? 1 : tech.macd.hist < 0 ? -1 : 0;
-        add('macd_hist', s, 0.8, `MACD histogram ${s >= 0 ? 'positive' : 'negative'} — momentum ${s >= 0 ? 'up' : 'down'}`);
-    }
-    if (tech.rsi != null) {
-        add('rsi_momentum', clamp1((tech.rsi - 50) / 20), 0.6, `RSI ${tech.rsi} — momentum ${tech.rsi >= 50 ? 'up' : 'down'}`);
-    }
-    if (tech.vwap != null && c != null) {
-        const s = c > tech.vwap ? 1 : c < tech.vwap ? -1 : 0;
-        add('vs_vwap', s, 0.5, `price ${s >= 0 ? 'above' : 'below'} VWAP`);
-    }
-    if (tech.bollinger?.upper != null && tech.bollinger.lower != null && c != null) {
-        const span = tech.bollinger.upper - tech.bollinger.lower;
-        if (span > 0) {
-            const pctB = (c - tech.bollinger.lower) / span; // 0 = lower band, 1 = upper band
-            add('bollinger_pctb', clamp1((pctB - 0.5) * 2), 0.4, `Bollinger %B ${(pctB * 100).toFixed(0)}% — ${pctB >= 0.5 ? 'upper' : 'lower'} half of the band`);
-        }
-    }
+    const factors = collectSignalFactors(tech);
 
     let mtfSummary = null;
     if (mtf) {
         try {
             const m = await getMultiTimeframe({market, symbol, _deps});
             mtfSummary = {...m.confluence, timeframes: m.timeframes.map((t) => ({interval: t.interval, trend: t.trend}))};
-            add('mtf_confluence', m.confluence.score, 1.0, `multi-timeframe ${m.confluence.bias} (${m.confluence.bullish}↑/${m.confluence.bearish}↓ of ${m.timeframes.length})`);
+            addFactor(factors, 'mtf_confluence', m.confluence.score, 1, `multi-timeframe ${m.confluence.bias} (${m.confluence.bullish}↑/${m.confluence.bearish}↓ of ${m.timeframes.length})`);
         } catch (err) {
             mtfSummary = {error: err.message};
         }
@@ -1510,7 +1567,7 @@ export async function getSignal({market = 'futures', symbol, interval = '1h', li
     // Weighted, normalized score over the factors that were available.
     const totalW = factors.reduce((s, f) => s + f.weight, 0);
     const score = totalW > 0 ? factors.reduce((s, f) => s + f.score * f.weight, 0) / totalW : 0;
-    const sign = score > 0 ? 1 : score < 0 ? -1 : 0;
+    const sign = cmpSign(score, 0);
 
     // Agreement: share of (weighted, non-flat) factors pointing the same way as the verdict.
     const active = factors.filter((f) => f.score !== 0);
@@ -1518,18 +1575,8 @@ export async function getSignal({market = 'futures', symbol, interval = '1h', li
     const agreeW = active.filter((f) => Math.sign(f.score) === sign).reduce((s, f) => s + f.weight, 0);
     const agreement = activeW > 0 ? agreeW / activeW : 0;
 
-    const cautions = [];
-    if (tech.rsi != null && tech.rsi >= 70) cautions.push(`RSI ${tech.rsi} overbought — pullback risk on longs`);
-    if (tech.rsi != null && tech.rsi <= 30) cautions.push(`RSI ${tech.rsi} oversold — bounce risk on shorts`);
-    if (tech.bollinger?.widthPct != null && tech.bollinger.widthPct < 2) cautions.push(`Bollinger bands narrow (${tech.bollinger.widthPct}%) — low volatility, breakout pending`);
-    if (factors.length < 4) cautions.push(`only ${factors.length} indicators available (too few bars?) — signal is low-confidence`);
-
-    const abs = Math.abs(score);
-    const signal = score >= 0.3 ? 'BUY' : score <= -0.3 ? 'SELL' : 'HOLD';
-    const strength = abs >= 0.6 ? 'strong' : abs >= 0.3 ? 'moderate' : 'weak';
-    // Confidence blends magnitude + agreement, knocked down a notch when a caution is in play.
-    let confidence = (abs >= 0.5 && agreement >= 0.7) ? 'high' : (abs >= 0.3 && agreement >= 0.55) ? 'moderate' : 'low';
-    if (confidence === 'high' && cautions.length) confidence = 'moderate';
+    const cautions = buildSignalCautions(tech, factors);
+    const {signal, strength, confidence} = signalVerdict(score, agreement, cautions);
 
     const reasons = factors
         .filter((f) => f.score !== 0)
@@ -1545,15 +1592,7 @@ export async function getSignal({market = 'futures', symbol, interval = '1h', li
         bearishFactors: factors.filter((f) => f.score < 0).length,
         reasons,
         ...(cautions.length ? {cautions} : {}),
-        technicals: {
-            rsi: tech.rsi,
-            macdHist: tech.macd?.hist ?? null,
-            sma200: tech.sma?.['200'] ?? null,
-            ema50: tech.ema?.['50'] ?? null,
-            vwap: tech.vwap,
-            trend: tech.classification.trend,
-            momentum: tech.classification.momentum
-        },
+        technicals: signalTechnicals(tech),
         ...(mtfSummary ? {multiTimeframe: mtfSummary} : {}),
     };
 }

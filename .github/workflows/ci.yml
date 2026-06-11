@@ -20,12 +20,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        # Node >= 22.15 required: tests use node:module registerHooks, and the
+        # test scripts rely on node --test's native glob support on Windows.
         os: [ ubuntu-latest, windows-latest ]
-        node-version: [20.x, 22.x]
-        exclude:
-          # node --test glob args need Node >= 21 when the shell (cmd) doesn't expand them
-          - os: windows-latest
-            node-version: 20.x
+        node-version: [ 22.x, 24.x ]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

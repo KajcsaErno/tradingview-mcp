@@ -24,6 +24,48 @@ import {getBookTicker, getSymbolInfo} from './market.js';
 import {getTechnicals, px} from './analysis.js';
 import {getAccountSummary, getBalance, getOpenOrders, getPositionMode, getPositions} from './account.js';
 
+/** Resolve calcPositionSize's stop: either the explicit `stop` price, or an ATR-derived stop
+ *  at entry ∓ atrMult·ATR(14) (below entry for a long, above for a short). */
+async function resolveSizingStop({market, symbol, entryP, stop, atrMult, side, interval, deps}) {
+    if (stop != null) return {stopP: requireFinite(stop, 'stop')};
+    if (atrMult == null) throw new Error('pass stop, or atrMult (+side) to derive an ATR-based stop');
+    const mult = requireFinite(atrMult, 'atrMult');
+    if (!symbol) throw new Error('ATR-based stop needs a symbol to pull candles for');
+    const sd = String(side || '').toUpperCase();
+    const isLong = ['BUY', 'LONG'].includes(sd);
+    const isShort = ['SELL', 'SHORT'].includes(sd);
+    if (!isLong && !isShort) throw new Error('ATR-based stop needs side: BUY/LONG or SELL/SHORT');
+    const tech = await getTechnicals({market, symbol, interval: interval || '1h', _deps: deps});
+    if (tech.atr == null) throw new Error('could not compute ATR (not enough candles) — pass an explicit stop instead');
+    const stopP = px(isLong ? entryP - mult * tech.atr : entryP + mult * tech.atr);
+    return {stopP, atrInfo: {source: 'ATR', atr: tech.atr, atrMult: mult, interval: interval || '1h'}};
+}
+
+/** Resolve the per-trade risk budget ($), plus the balance it was derived from (if any). */
+async function resolveRiskBudget({market, account, riskAmount, riskPct, balance, deps}) {
+    let bal = balance == null ? undefined : Number(balance);
+    if (riskAmount != null) return {risk: requireFinite(riskAmount, 'riskAmount'), bal};
+    const pct = requireFinite(riskPct, 'riskPct');
+    if (bal == null && isFuturesLike(market)) {
+        try {
+            bal = Number((await getAccountSummary({market, account, _deps: deps})).totalMarginBalance);
+        } catch { /* leave undefined */
+        }
+    }
+    if (bal == null || !Number.isFinite(bal)) throw new Error('riskPct needs a balance — pass balance, or use a futures account so it can be fetched');
+    return {risk: bal * (pct / 100), bal};
+}
+
+/** Collect sizing warnings: 3x-rule breaches, margin vs balance, minQty floor. */
+function sizingWarnings({lev, bal, notional, requiredMargin, info, qty}) {
+    const warnings = [];
+    if (lev > 3) warnings.push(`leverage ${lev}x exceeds your 3x rule`);
+    if (bal != null && notional / bal > 3.0001) warnings.push(`implied account leverage ${(notional / bal).toFixed(2)}x exceeds 3x`);
+    if (bal != null && requiredMargin > bal) warnings.push('required margin exceeds balance');
+    if (info && Number(info.minQty) && qty < Number(info.minQty)) warnings.push(`quantity ${qty} is below minQty ${info.minQty}`);
+    return warnings;
+}
+
 /** Risk-based position sizing: from entry, stop and a risk budget (riskAmount or riskPct of
  *  balance), compute the quantity whose loss-to-stop equals the budget, plus notional and
  *  required margin at `leverage`. Warns if the plan breaches the 3x rule or available margin. */
@@ -37,40 +79,10 @@ export async function calcPositionSize({
     const deps = resolveDeps(account, _deps);
     // Stop comes either from an explicit price, or is derived from ATR (entry ± atrMult·ATR).
     // The ATR path needs the position side (so the stop sits on the right side) and a symbol.
-    let stopP, atrInfo;
-    if (stop != null) {
-        stopP = requireFinite(stop, 'stop');
-    } else if (atrMult != null) {
-        const mult = requireFinite(atrMult, 'atrMult');
-        if (!symbol) throw new Error('ATR-based stop needs a symbol to pull candles for');
-        const sd = String(side || '').toUpperCase();
-        const isLong = ['BUY', 'LONG'].includes(sd);
-        const isShort = ['SELL', 'SHORT'].includes(sd);
-        if (!isLong && !isShort) throw new Error('ATR-based stop needs side: BUY/LONG or SELL/SHORT');
-        const tech = await getTechnicals({market, symbol, interval: interval || '1h', _deps: deps});
-        if (tech.atr == null) throw new Error('could not compute ATR (not enough candles) — pass an explicit stop instead');
-        stopP = px(isLong ? entryP - mult * tech.atr : entryP + mult * tech.atr);
-        atrInfo = {source: 'ATR', atr: tech.atr, atrMult: mult, interval: interval || '1h'};
-    } else {
-        throw new Error('pass stop, or atrMult (+side) to derive an ATR-based stop');
-    }
+    const {stopP, atrInfo} = await resolveSizingStop({market, symbol, entryP, stop, atrMult, side, interval, deps});
     if (entryP === stopP) throw new Error('entry and stop must differ');
     if (riskAmount == null && riskPct == null) throw new Error('pass riskAmount ($) or riskPct (% of balance)');
-    let bal = balance != null ? Number(balance) : undefined;
-    let risk;
-    if (riskAmount != null) {
-        risk = requireFinite(riskAmount, 'riskAmount');
-    } else {
-        const pct = requireFinite(riskPct, 'riskPct');
-        if (bal == null && isFuturesLike(market)) {
-            try {
-                bal = Number((await getAccountSummary({market, account, _deps: deps})).totalMarginBalance);
-            } catch { /* leave undefined */
-            }
-        }
-        if (bal == null || !Number.isFinite(bal)) throw new Error('riskPct needs a balance — pass balance, or use a futures account so it can be fetched');
-        risk = bal * (pct / 100);
-    }
+    const {risk, bal} = await resolveRiskBudget({market, account, riskAmount, riskPct, balance, deps});
     const riskPerUnit = Math.abs(entryP - stopP);
     let qty = risk / riskPerUnit;
     let info;
@@ -83,19 +95,15 @@ export async function calcPositionSize({
     }
     const notional = qty * entryP;
     const requiredMargin = notional / lev;
-    const warnings = [];
-    if (lev > 3) warnings.push(`leverage ${lev}x exceeds your 3x rule`);
-    if (bal != null && notional / bal > 3.0001) warnings.push(`implied account leverage ${(notional / bal).toFixed(2)}x exceeds 3x`);
-    if (bal != null && requiredMargin > bal) warnings.push('required margin exceeds balance');
-    if (info && Number(info.minQty) && qty < Number(info.minQty)) warnings.push(`quantity ${qty} is below minQty ${info.minQty}`);
+    const warnings = sizingWarnings({lev, bal, notional, requiredMargin, info, qty});
     return {
         success: true, market, symbol: symbol ? String(symbol).toUpperCase() : undefined,
         side: stopP < entryP ? 'LONG (BUY)' : 'SHORT (SELL)',
         entry: entryP, stop: stopP, leverage: lev,
         riskAmount: Number(risk.toFixed(2)), riskPerUnit: Number(riskPerUnit.toFixed(8)),
         quantity: Number(qty.toFixed(8)), notional: Number(notional.toFixed(2)), requiredMargin: Number(requiredMargin.toFixed(2)),
-        balance: bal != null ? Number(bal.toFixed(2)) : undefined,
-        impliedAccountLeverage: bal != null ? Number((notional / bal).toFixed(2)) : undefined,
+        balance: bal == null ? undefined : Number(bal.toFixed(2)),
+        impliedAccountLeverage: bal == null ? undefined : Number((notional / bal).toFixed(2)),
         atrStop: atrInfo,
         warnings: warnings.length ? warnings : undefined,
     };
@@ -139,6 +147,138 @@ function dryRunResponse({paperTrading, paperMsg, dryMsg, extra = {}, tail = {}})
     };
 }
 
+/** Validate placeOrder's symbol/side/type/flag combination. Returns the normalized
+ *  {sym, sd, ty} plus the {isStop, futures, coinm} routing facts. */
+function validatePlaceOrderInputs({market, symbol, side, type, allowTaker, closePosition}) {
+    const {sym, sd} = validateOrderInputs({symbol, side, symbolMsg: 'symbol is required (e.g. "BTCUSDT")'});
+    const ty = String(type).toUpperCase();
+    if (!ORDER_TYPES.includes(ty)) throw new Error(`type must be one of: ${ORDER_TYPES.join(', ')}`);
+    const isStop = STOP_TYPES.includes(ty);
+    const futures = isFuturesLike(market); // USD-M or COIN-M — both share order semantics/endpoints (only the prefix differs)
+    const coinm = isCoinM(market);
+    // Post-only is enforced by default; taker-only order types must be opted into explicitly.
+    if (TAKER_TYPES.includes(ty) && !allowTaker) {
+        throw new Error(`${ty} is a taker-only order (it crosses the book and cannot be post-only/maker). Pass allowTaker:true (CLI --allowTaker) to place it and accept the taker fee.`);
+    }
+    if (closePosition && !futures) throw new Error('closePosition is futures-only');
+    if (closePosition && !isStop) throw new Error('closePosition is only valid with a stop/TP order type');
+    return {sym, sd, ty, isStop, futures, coinm};
+}
+
+/** LIMIT-family pricing: set price and timeInForce, mapping post-only to GTX on futures
+ *  or the distinct LIMIT_MAKER order type on spot. */
+function applyLimitPricing({params, ty, futures, price, postOnly, timeInForce}) {
+    params.price = String(requireFinite(price, 'price'));
+    let tif = timeInForce ? String(timeInForce).toUpperCase() : null;
+    if (tif && !VALID_TIF.includes(tif)) throw new Error(`timeInForce must be one of: ${VALID_TIF.join(', ')}`);
+    if (postOnly) {
+        if (futures) {
+            tif = 'GTX'; // post-only / maker-only on Binance futures
+        } else if (ty === 'LIMIT') {
+            params.type = 'LIMIT_MAKER'; // spot post-only is a distinct order type, no timeInForce
+            tif = null;
+        } else {
+            throw new Error('postOnly on spot is only supported for plain LIMIT orders (LIMIT_MAKER)');
+        }
+    }
+    if (params.type !== 'LIMIT_MAKER') params.timeInForce = tif || 'GTC';
+}
+
+/** Assemble the base order params: quantity / closePosition, LIMIT pricing, stop trigger,
+ *  client id, and reduceOnly (mutually exclusive with closePosition on Binance). */
+function buildOrderParams({sym, sd, ty, isStop, futures, quantity, price, stopPrice, closePosition, reduceOnly, postOnly, timeInForce, newClientOrderId}) {
+    const params = {symbol: sym, side: sd, type: ty};
+    // Quantity: required unless this is a futures closePosition stop/TP (which closes the whole position).
+    if (closePosition) {
+        params.closePosition = 'true';
+    } else {
+        const qty = requireFinite(quantity, 'quantity');
+        if (qty <= 0) throw new Error('quantity must be > 0');
+        params.quantity = String(qty);
+    }
+    if (LIMIT_TYPES.includes(ty)) applyLimitPricing({params, ty, futures, price, postOnly, timeInForce});
+    if (isStop) {
+        params.stopPrice = String(requireFinite(stopPrice, 'stopPrice'));
+    }
+    if (newClientOrderId) params.newClientOrderId = String(newClientOrderId);
+    // reduceOnly and closePosition are mutually exclusive on Binance.
+    if (reduceOnly && futures && !closePosition) params.reduceOnly = 'true';
+    return params;
+}
+
+/** Hedge Mode handling: validate/apply positionSide. On confirm with no positionSide on a
+ *  futures order, detect hedge mode and refuse to guess which position to target. */
+async function applyPositionSide({params, market, positionSide, futures, confirm, deps}) {
+    const ps = positionSide ? String(positionSide).toUpperCase() : null;
+    if (ps && !['LONG', 'SHORT', 'BOTH'].includes(ps)) throw new Error('positionSide must be LONG, SHORT, or BOTH');
+    if (!futures) return;
+    if (!ps && confirm) {
+        const mode = await getPositionMode({market, _deps: deps});
+        if (mode.hedgeMode) throw new Error('Account is in Hedge Mode — pass positionSide:"LONG" or "SHORT" (CLI --positionSide) so the order targets the right position.');
+    }
+    if (ps && ps !== 'BOTH') {
+        params.positionSide = ps;
+        delete params.reduceOnly; // reduceOnly is rejected in hedge mode (positionSide implies it)
+    } else if (ps === 'BOTH') {
+        params.positionSide = 'BOTH';
+    }
+}
+
+/** Snap price/stopPrice/quantity to the symbol's tick/step so the order isn't rejected.
+ *  Returns {contractSize} on success; on filter-load failure throws when confirming
+ *  (the live order would risk rejection) or returns a {rounding_note} on a dry run. */
+async function roundOrderParams({params, market, sym, confirm, deps}) {
+    try {
+        const info = await getSymbolInfo({market, symbol: sym, _deps: deps});
+        if (params.price !== undefined) params.price = String(snap(params.price, info.tickSize, 'round'));
+        if (params.stopPrice !== undefined) params.stopPrice = String(snap(params.stopPrice, info.tickSize, 'round'));
+        if (params.quantity !== undefined) params.quantity = String(snap(params.quantity, info.stepSize, 'floor'));
+        return {contractSize: info.contractSize};
+    } catch (err) {
+        if (confirm) throw new Error(`Could not load symbol filters to round price/qty (${err.message}). Pass round:false to place without rounding.`);
+        return {rounding_note: `precision rounding skipped — filters unavailable (${err.message})`};
+    }
+}
+
+/** COIN-M sizes orders in CONTRACTS (fixed USD notional each), not coin amount — surface that. */
+function coinmQuantityNote(coinm, contractSize) {
+    if (!coinm) return undefined;
+    const sizeNote = contractSize ? ` (1 contract = ${contractSize} USD)` : ' (see symbol-info contractSize)';
+    return `COIN-M: quantity is in CONTRACTS, not coin amount${sizeNote}.`;
+}
+
+/** Route the order to the right endpoint. USD-M migrated conditional orders (STOP/TP/TRAILING)
+ *  to the Algo endpoint (2025-12-09): they POST to /fapi/v1/algoOrder with algoType=CONDITIONAL
+ *  and `triggerPrice` (not stopPrice). COIN-M (dapi) is intentionally NOT routed here — Binance
+ *  has not migrated it (verified 2026-06); the -4120 fallback on send self-heals if that changes. */
+function resolveOrderEndpoint({params, market, isStop, futures}) {
+    if (isStop && isFutures(market)) {
+        Object.assign(params, toAlgoParams(params));
+        delete params.stopPrice;
+        delete params.newClientOrderId;
+        return {endpoint: `${futPrefix(market)}/v1/algoOrder`, useAlgo: true};
+    }
+    return {endpoint: futures ? `${futPrefix(market)}/v1/order` : '/api/v3/order', useAlgo: false};
+}
+
+/** POST the order; self-heal if Binance migrates COIN-M conditionals to the Algo service
+ *  like USD-M (the -4120 rejection retries on the Algo endpoint). */
+async function sendOrderWithAlgoFallback({market, account, endpoint, params, isStop, useAlgo, isLive, deps}) {
+    try {
+        const data = await signedRequest({market, method: 'POST', endpoint, params, _deps: deps});
+        return {success: true, market, account, live_funds: isLive, algo: useAlgo, order: data};
+    } catch (err) {
+        if (isStop && isCoinM(market) && isAlgoMigrationError(err)) {
+            const data = await signedRequest({
+                market, method: 'POST', endpoint: `${futPrefix(market)}/v1/algoOrder`,
+                params: toAlgoParams(params), _deps: deps,
+            });
+            return {success: true, market, account, live_funds: isLive, algo: true, algo_fallback: true, order: data};
+        }
+        throw err;
+    }
+}
+
 /**
  * Place an order. DRY-RUN by default — returns a preview and does NOT hit Binance
  * unless `confirm: true` is passed. This is intentional: it prevents accidental fills.
@@ -163,113 +303,40 @@ export async function placeOrder({
     const deps = resolveDeps(account, _deps);
     const paperTrading = usePaperTrading(_deps);
     if (paperTrading) confirm = false; // global kill-switch
-    const {sym, sd} = validateOrderInputs({symbol, side, symbolMsg: 'symbol is required (e.g. "BTCUSDT")'});
-    const ty = String(type).toUpperCase();
-    if (!ORDER_TYPES.includes(ty)) throw new Error(`type must be one of: ${ORDER_TYPES.join(', ')}`);
-    const isStop = STOP_TYPES.includes(ty);
-    const futures = isFuturesLike(market); // USD-M or COIN-M — both share order semantics/endpoints (only the prefix differs)
-    const coinm = isCoinM(market);
-    // Post-only is enforced by default; taker-only order types must be opted into explicitly.
-    if (TAKER_TYPES.includes(ty) && !allowTaker) {
-        throw new Error(`${ty} is a taker-only order (it crosses the book and cannot be post-only/maker). Pass allowTaker:true (CLI --allowTaker) to place it and accept the taker fee.`);
-    }
-    if (closePosition && !futures) throw new Error('closePosition is futures-only');
-    if (closePosition && !isStop) throw new Error('closePosition is only valid with a stop/TP order type');
-
-    const params = {symbol: sym, side: sd, type: ty};
-
-    // Quantity: required unless this is a futures closePosition stop/TP (which closes the whole position).
-    if (closePosition) {
-        params.closePosition = 'true';
-    } else {
-        const qty = requireFinite(quantity, 'quantity');
-        if (qty <= 0) throw new Error('quantity must be > 0');
-        params.quantity = String(qty);
-    }
-
-    if (LIMIT_TYPES.includes(ty)) {
-        params.price = String(requireFinite(price, 'price'));
-        let tif = timeInForce ? String(timeInForce).toUpperCase() : null;
-        if (tif && !VALID_TIF.includes(tif)) throw new Error(`timeInForce must be one of: ${VALID_TIF.join(', ')}`);
-        if (postOnly) {
-            if (futures) {
-                tif = 'GTX'; // post-only / maker-only on Binance futures
-            } else if (ty === 'LIMIT') {
-                params.type = 'LIMIT_MAKER'; // spot post-only is a distinct order type, no timeInForce
-                tif = null;
-            } else {
-                throw new Error('postOnly on spot is only supported for plain LIMIT orders (LIMIT_MAKER)');
-            }
-        }
-        if (params.type !== 'LIMIT_MAKER') params.timeInForce = tif || 'GTC';
-    }
-    if (isStop) {
-        params.stopPrice = String(requireFinite(stopPrice, 'stopPrice'));
-    }
-    if (newClientOrderId) params.newClientOrderId = String(newClientOrderId);
-    // reduceOnly and closePosition are mutually exclusive on Binance.
-    if (reduceOnly && futures && !closePosition) params.reduceOnly = 'true';
+    const {sym, sd, ty, isStop, futures, coinm} = validatePlaceOrderInputs({market, symbol, side, type, allowTaker, closePosition});
+    const params = buildOrderParams({
+        sym,
+        sd,
+        ty,
+        isStop,
+        futures,
+        quantity,
+        price,
+        stopPrice,
+        closePosition,
+        reduceOnly,
+        postOnly,
+        timeInForce,
+        newClientOrderId
+    });
 
     // Hedge Mode: orders must carry positionSide (LONG/SHORT) and cannot use reduceOnly.
-    let ps = positionSide ? String(positionSide).toUpperCase() : null;
-    if (ps && !['LONG', 'SHORT', 'BOTH'].includes(ps)) throw new Error('positionSide must be LONG, SHORT, or BOTH');
-    if (futures) {
-        if (!ps && confirm) {
-            const mode = await getPositionMode({market, _deps: deps});
-            if (mode.hedgeMode) throw new Error('Account is in Hedge Mode — pass positionSide:"LONG" or "SHORT" (CLI --positionSide) so the order targets the right position.');
-        }
-        if (ps && ps !== 'BOTH') {
-            params.positionSide = ps;
-            delete params.reduceOnly; // reduceOnly is rejected in hedge mode (positionSide implies it)
-        } else if (ps === 'BOTH') {
-            params.positionSide = 'BOTH';
-        }
-    }
+    await applyPositionSide({params, market, positionSide, futures, confirm, deps});
 
-    // Snap price/stopPrice/quantity to the symbol's tick/step so the order isn't rejected.
-    let rounding_note;
-    let contractSize;
-    if (round) {
-        try {
-            const info = await getSymbolInfo({market, symbol: sym, _deps: deps});
-            contractSize = info.contractSize;
-            if (params.price !== undefined) params.price = String(snap(params.price, info.tickSize, 'round'));
-            if (params.stopPrice !== undefined) params.stopPrice = String(snap(params.stopPrice, info.tickSize, 'round'));
-            if (params.quantity !== undefined) params.quantity = String(snap(params.quantity, info.stepSize, 'floor'));
-        } catch (err) {
-            if (confirm) throw new Error(`Could not load symbol filters to round price/qty (${err.message}). Pass round:false to place without rounding.`);
-            rounding_note = `precision rounding skipped — filters unavailable (${err.message})`;
-        }
-    }
-
-    // COIN-M sizes orders in CONTRACTS (fixed USD notional each), not coin amount — surface that.
-    const coinm_note = coinm
-        ? `COIN-M: quantity is in CONTRACTS, not coin amount${contractSize ? ` (1 contract = ${contractSize} USD)` : ' (see symbol-info contractSize)'}.`
-        : undefined;
-
-    // USD-M migrated conditional orders (STOP/TP/TRAILING) to the Algo endpoint (2025-12-09):
-    // they POST to /fapi/v1/algoOrder with algoType=CONDITIONAL and `triggerPrice` (not stopPrice).
-    // COIN-M (dapi) is intentionally NOT routed here — Binance has not migrated it (verified
-    // 2026-06); a -4120 fallback below self-heals if that ever changes.
-    const useAlgo = isStop && isFutures(market);
-    let endpoint;
-    if (useAlgo) {
-        endpoint = `${futPrefix(market)}/v1/algoOrder`;
-        Object.assign(params, toAlgoParams(params));
-        delete params.stopPrice;
-        delete params.newClientOrderId;
-    } else {
-        endpoint = futures ? `${futPrefix(market)}/v1/order` : '/api/v3/order';
-    }
+    const {rounding_note, contractSize} = round ? await roundOrderParams({params, market, sym, confirm, deps}) : {};
+    const coinm_note = coinmQuantityNote(coinm, contractSize);
+    const {endpoint, useAlgo} = resolveOrderEndpoint({params, market, isStop, futures});
 
     const isLive = !resolveMarket(market, deps).includes('testnet');
     const preview = {market, endpoint, ...params, live_funds: isLive};
 
     if (!confirm) {
+        const env = isLive ? 'LIVE (real funds)' : 'TESTNET';
+        const kind = useAlgo ? 'conditional (algo) order' : 'order';
         return dryRunResponse({
             paperTrading,
-            paperMsg: `PAPER TRADING — would place a ${isLive ? 'LIVE (real funds)' : 'TESTNET'} ${useAlgo ? 'conditional (algo) order' : 'order'}; decision logged, nothing sent.`,
-            dryMsg: `DRY RUN — no order sent. Pass confirm:true to place this ${isLive ? 'LIVE (real funds)' : 'TESTNET'} ${useAlgo ? 'conditional (algo) order' : 'order'}.`,
+            paperMsg: `PAPER TRADING — would place a ${env} ${kind}; decision logged, nothing sent.`,
+            dryMsg: `DRY RUN — no order sent. Pass confirm:true to place this ${env} ${kind}.`,
             extra: {account},
             tail: {
                 ...(coinm_note ? {coinm_note} : {}),
@@ -279,20 +346,7 @@ export async function placeOrder({
         });
     }
 
-    try {
-        const data = await signedRequest({market, method: 'POST', endpoint, params, _deps: deps});
-        return {success: true, market, account, live_funds: isLive, algo: useAlgo, order: data};
-    } catch (err) {
-        // Self-heal if Binance migrates COIN-M conditionals to the Algo service like USD-M.
-        if (isStop && isCoinM(market) && isAlgoMigrationError(err)) {
-            const data = await signedRequest({
-                market, method: 'POST', endpoint: `${futPrefix(market)}/v1/algoOrder`,
-                params: toAlgoParams(params), _deps: deps,
-            });
-            return {success: true, market, account, live_funds: isLive, algo: true, algo_fallback: true, order: data};
-        }
-        throw err;
-    }
+    return sendOrderWithAlgoFallback({market, account, endpoint, params, isStop, useAlgo, isLive, deps});
 }
 
 /** Cancel an open order by orderId.
@@ -377,6 +431,120 @@ export async function getOrderHistory({market = 'futures', symbol, orderId, star
     return {success: true, market, symbol: sym, count: data.length, orders: data};
 }
 
+/** Normalize takeProfits into {price, quantity} legs; with multiple TPs each needs a quantity. */
+function normalizeTakeProfits(takeProfits) {
+    const tps = (takeProfits || []).map((tp, i) => ({
+        price: requireFinite(tp.price ?? tp, `takeProfits[${i}].price`),
+        quantity: tp.quantity === undefined ? undefined : requireFinite(tp.quantity, `takeProfits[${i}].quantity`),
+    }));
+    if (tps.length > 1 && tps.some((tp) => tp.quantity === undefined)) {
+        throw new Error('with multiple take-profits, each must have its own quantity (closePosition would close the whole position on the first fill)');
+    }
+    return tps;
+}
+
+/** Build the bracket's legs: optional entry, optional closePosition stop, and TP legs
+ *  (per-TP quantity → reduceOnly; no quantity → closePosition). */
+function buildBracketLegs({sym, sd, exit, qty, includeEntry, entryType, entryPrice, postOnly, stopPrice, tps}) {
+    const legs = [];
+    if (includeEntry) {
+        const ety = String(entryType).toUpperCase();
+        if (!['MARKET', 'LIMIT'].includes(ety)) throw new Error('entryType must be MARKET or LIMIT');
+        const entry = {leg: 'entry', symbol: sym, side: sd, type: ety, quantity: String(qty)};
+        if (ety === 'LIMIT') {
+            entry.price = String(requireFinite(entryPrice, 'entryPrice'));
+            entry.timeInForce = postOnly ? 'GTX' : 'GTC'; // GTX = post-only (maker-only)
+        }
+        // A MARKET entry is taker — gated by the allowTaker check in placeBracket.
+        legs.push(entry);
+    }
+    if (stopPrice !== undefined && stopPrice !== null) {
+        legs.push({leg: 'stop', symbol: sym, side: exit, type: 'STOP_MARKET', stopPrice: String(requireFinite(stopPrice, 'stopPrice')), closePosition: 'true'});
+    }
+    tps.forEach((tp, i) => {
+        const o = {leg: `tp${i + 1}`, symbol: sym, side: exit, type: 'TAKE_PROFIT_MARKET', stopPrice: String(tp.price)};
+        if (tp.quantity === undefined) {
+            o.closePosition = 'true';
+        } else {
+            o.quantity = String(tp.quantity);
+            o.reduceOnly = 'true';
+        }
+        legs.push(o);
+    });
+    if (legs.length === 0) throw new Error('nothing to place: provide entry, stopPrice, and/or takeProfits');
+    return legs;
+}
+
+/** Refuse taker legs unless explicitly allowed (post-only by default). */
+function assertBracketMakerOnly(legs, allowTaker) {
+    const takerLegs = legs.filter((l) => TAKER_TYPES.includes(l.type));
+    if (takerLegs.length && !allowTaker) {
+        throw new Error(`This bracket has taker-only legs (${takerLegs.map((l) => l.leg).join(', ')}) — stops and market take-profits (and a MARKET entry) cross the book and cannot be post-only. Pass allowTaker:true (CLI --allowTaker) to place them and accept taker fees on those legs.`);
+    }
+}
+
+/** Hedge Mode: every leg carries positionSide (from the position direction) and drops
+ *  reduceOnly. With `hedge` unset on confirm, the account's position mode is detected. */
+async function applyBracketHedgeMode({legs, market, sd, hedge, confirm, deps}) {
+    let hedgeMode = hedge;
+    if (hedgeMode === undefined && confirm) {
+        hedgeMode = (await getPositionMode({market, _deps: deps})).hedgeMode;
+    }
+    if (hedgeMode) {
+        const posSide = sd === 'BUY' ? 'LONG' : 'SHORT';
+        for (const leg of legs) {
+            leg.positionSide = posSide;
+            delete leg.reduceOnly; // rejected in hedge mode (positionSide implies close intent)
+        }
+    }
+    return hedgeMode;
+}
+
+/** Snap every leg's price/stopPrice/quantity to the symbol's tick/step. Returns a rounding
+ *  note when filters are unavailable on a dry run; throws when confirming. */
+async function roundBracketLegs({legs, market, sym, confirm, deps}) {
+    try {
+        const info = await getSymbolInfo({market, symbol: sym, _deps: deps});
+        for (const leg of legs) {
+            if (leg.price !== undefined) leg.price = String(snap(leg.price, info.tickSize, 'round'));
+            if (leg.stopPrice !== undefined) leg.stopPrice = String(snap(leg.stopPrice, info.tickSize, 'round'));
+            if (leg.quantity !== undefined) leg.quantity = String(snap(leg.quantity, info.stepSize, 'floor'));
+        }
+        return undefined;
+    } catch (err) {
+        if (confirm) throw new Error(`Could not load symbol filters to round bracket legs (${err.message}). Pass round:false to place without rounding.`);
+        return `precision rounding skipped — filters unavailable (${err.message})`;
+    }
+}
+
+/** Place one bracket leg. Conditional legs (stop / TP-market) route to the Algo endpoint on
+ *  USD-M (post-2025-12-09); COIN-M legs stay on /dapi/v1/order (not migrated as of 2026-06)
+ *  with the -4120 fallback to self-heal. Never throws — returns a per-leg success/error
+ *  record so the caller sees the full picture. */
+async function placeBracketLeg({market, name, rawParams, deps}) {
+    const isStopLeg = STOP_TYPES.includes(rawParams.type);
+    const useAlgo = isStopLeg && isFutures(market);
+    const endpoint = useAlgo ? `${futPrefix(market)}/v1/algoOrder` : `${futPrefix(market)}/v1/order`;
+    const params = useAlgo ? toAlgoParams(rawParams) : rawParams;
+    try {
+        const data = await signedRequest({market, method: 'POST', endpoint, params, _deps: deps});
+        return {leg: name, success: true, orderId: data.orderId ?? data.algoId, algo: useAlgo, params};
+    } catch (err) {
+        if (isStopLeg && isCoinM(market) && isAlgoMigrationError(err)) {
+            try {
+                const data = await signedRequest({
+                    market, method: 'POST', endpoint: `${futPrefix(market)}/v1/algoOrder`,
+                    params: toAlgoParams(rawParams), _deps: deps,
+                });
+                return {leg: name, success: true, orderId: data.orderId ?? data.algoId, algo: true, algo_fallback: true, params};
+            } catch (err_) {
+                return {leg: name, success: false, error: err_.message, params};
+            }
+        }
+        return {leg: name, success: false, error: err.message, params};
+    }
+}
+
 /**
  * Place a full bracket in one shot: optional entry + protective stop + take-profit(s).
  * Maps a chart trade plan (entry / STOP / TP1..TPn) onto real Binance orders.
@@ -413,81 +581,20 @@ export async function placeBracket({
     const qty = requireFinite(quantity, 'quantity');
     if (qty <= 0) throw new Error('quantity must be > 0');
 
-    const tps = (takeProfits || []).map((tp, i) => ({
-        price: requireFinite(tp.price ?? tp, `takeProfits[${i}].price`),
-        quantity: tp.quantity !== undefined ? requireFinite(tp.quantity, `takeProfits[${i}].quantity`) : undefined,
-    }));
-    if (tps.length > 1 && tps.some((tp) => tp.quantity === undefined)) {
-        throw new Error('with multiple take-profits, each must have its own quantity (closePosition would close the whole position on the first fill)');
-    }
-
-    const legs = [];
-    if (includeEntry) {
-        const ety = String(entryType).toUpperCase();
-        if (!['MARKET', 'LIMIT'].includes(ety)) throw new Error('entryType must be MARKET or LIMIT');
-        const entry = {leg: 'entry', symbol: sym, side: sd, type: ety, quantity: String(qty)};
-        if (ety === 'LIMIT') {
-            entry.price = String(requireFinite(entryPrice, 'entryPrice'));
-            entry.timeInForce = postOnly ? 'GTX' : 'GTC'; // GTX = post-only (maker-only)
-        }
-        // A MARKET entry is taker — gated by the allowTaker check below.
-        legs.push(entry);
-    }
-    if (stopPrice !== undefined && stopPrice !== null) {
-        legs.push({leg: 'stop', symbol: sym, side: exit, type: 'STOP_MARKET', stopPrice: String(requireFinite(stopPrice, 'stopPrice')), closePosition: 'true'});
-    }
-    tps.forEach((tp, i) => {
-        const o = {leg: `tp${i + 1}`, symbol: sym, side: exit, type: 'TAKE_PROFIT_MARKET', stopPrice: String(tp.price)};
-        if (tp.quantity !== undefined) {
-            o.quantity = String(tp.quantity);
-            o.reduceOnly = 'true';
-        } else {
-            o.closePosition = 'true';
-        }
-        legs.push(o);
-    });
-    if (legs.length === 0) throw new Error('nothing to place: provide entry, stopPrice, and/or takeProfits');
-
-    const takerLegs = legs.filter((l) => TAKER_TYPES.includes(l.type));
-    if (takerLegs.length && !allowTaker) {
-        throw new Error(`This bracket has taker-only legs (${takerLegs.map((l) => l.leg).join(', ')}) — stops and market take-profits (and a MARKET entry) cross the book and cannot be post-only. Pass allowTaker:true (CLI --allowTaker) to place them and accept taker fees on those legs.`);
-    }
-
-    // Hedge Mode: every leg carries positionSide (from the position direction) and drops reduceOnly.
-    let hedgeMode = hedge;
-    if (hedgeMode === undefined && confirm) {
-        hedgeMode = (await getPositionMode({market, _deps: deps})).hedgeMode;
-    }
-    if (hedgeMode) {
-        const posSide = sd === 'BUY' ? 'LONG' : 'SHORT';
-        for (const leg of legs) {
-            leg.positionSide = posSide;
-            delete leg.reduceOnly; // rejected in hedge mode (positionSide implies close intent)
-        }
-    }
-
-    // Snap every leg's price/stopPrice/quantity to the symbol's tick/step.
-    let rounding_note;
-    if (round) {
-        try {
-            const info = await getSymbolInfo({market, symbol: sym, _deps: deps});
-            for (const leg of legs) {
-                if (leg.price !== undefined) leg.price = String(snap(leg.price, info.tickSize, 'round'));
-                if (leg.stopPrice !== undefined) leg.stopPrice = String(snap(leg.stopPrice, info.tickSize, 'round'));
-                if (leg.quantity !== undefined) leg.quantity = String(snap(leg.quantity, info.stepSize, 'floor'));
-            }
-        } catch (err) {
-            if (confirm) throw new Error(`Could not load symbol filters to round bracket legs (${err.message}). Pass round:false to place without rounding.`);
-            rounding_note = `precision rounding skipped — filters unavailable (${err.message})`;
-        }
-    }
+    const tps = normalizeTakeProfits(takeProfits);
+    const legs = buildBracketLegs({sym, sd, exit, qty, includeEntry, entryType, entryPrice, postOnly, stopPrice, tps});
+    assertBracketMakerOnly(legs, allowTaker);
+    const hedgeMode = await applyBracketHedgeMode({legs, market, sd, hedge, confirm, deps});
+    const rounding_note = round ? await roundBracketLegs({legs, market, sym, confirm, deps}) : undefined;
 
     const isLive = !resolveMarket(market, deps).includes('testnet');
     if (!confirm) {
+        const env = isLive ? 'LIVE (real funds)' : 'TESTNET';
+        const legNames = legs.map((l) => l.leg).join(', ');
         return dryRunResponse({
             paperTrading,
-            paperMsg: `PAPER TRADING — would place this ${isLive ? 'LIVE (real funds)' : 'TESTNET'} bracket (${legs.length} legs: ${legs.map((l) => l.leg).join(', ')}); decision logged, nothing sent.`,
-            dryMsg: `DRY RUN — ${legs.length} legs (${legs.map((l) => l.leg).join(', ')}). Pass confirm:true to place this ${isLive ? 'LIVE (real funds)' : 'TESTNET'} bracket.`,
+            paperMsg: `PAPER TRADING — would place this ${env} bracket (${legs.length} legs: ${legNames}); decision logged, nothing sent.`,
+            dryMsg: `DRY RUN — ${legs.length} legs (${legNames}). Pass confirm:true to place this ${env} bracket.`,
             extra: {market, account, live_funds: isLive, hedgeMode: !!hedgeMode},
             tail: {
                 ...(rounding_note ? {rounding_note} : {}),
@@ -498,31 +605,7 @@ export async function placeBracket({
 
     const results = [];
     for (const {leg: name, ...rawParams} of legs) {
-        // Conditional legs (stop / TP-market) route to the Algo endpoint on USD-M (post-2025-12-09).
-        // COIN-M legs stay on /dapi/v1/order (not migrated as of 2026-06); -4120 fallback self-heals.
-        const isStopLeg = STOP_TYPES.includes(rawParams.type);
-        const useAlgo = isStopLeg && isFutures(market);
-        const endpoint = useAlgo ? `${futPrefix(market)}/v1/algoOrder` : `${futPrefix(market)}/v1/order`;
-        const params = useAlgo ? toAlgoParams(rawParams) : rawParams;
-        try {
-            const data = await signedRequest({market, method: 'POST', endpoint, params, _deps: deps});
-            results.push({leg: name, success: true, orderId: data.orderId ?? data.algoId, algo: useAlgo, params});
-        } catch (err) {
-            if (isStopLeg && isCoinM(market) && isAlgoMigrationError(err)) {
-                try {
-                    const data = await signedRequest({
-                        market, method: 'POST', endpoint: `${futPrefix(market)}/v1/algoOrder`,
-                        params: toAlgoParams(rawParams), _deps: deps,
-                    });
-                    results.push({leg: name, success: true, orderId: data.orderId ?? data.algoId, algo: true, algo_fallback: true, params});
-                    continue;
-                } catch (err2) {
-                    results.push({leg: name, success: false, error: err2.message, params});
-                    continue;
-                }
-            }
-            results.push({leg: name, success: false, error: err.message, params});
-        }
+        results.push(await placeBracketLeg({market, name, rawParams, deps}));
     }
     const placed = results.filter((r) => r.success).length;
     return {success: results.every((r) => r.success), market, account, live_funds: isLive, placed, total: results.length, legs: results};
@@ -586,69 +669,49 @@ async function batchPlaceOrders({market, orders, deps}) {
     return results;
 }
 
-/**
- * Scale into a position with a ladder of post-only LIMIT rungs evenly spaced across [lo, hi],
- * optionally seeded with a MARKET order and guarded by a closePosition stop. DRY-RUN by default —
- * returns the full plan and sends nothing unless confirm:true. On confirm: seed first, then the
- * stop, then the rungs via batchOrders (5/request). Inherits post-only/hedge/precision rules.
- * Provide exactly one of totalNotional (split evenly by $) or totalQuantity (split evenly by qty).
- */
-export async function placeLadder({
-                                      market = 'futures', symbol, side, lo, hi, count = 10,
-                                      totalNotional, totalQuantity, positionSide,
-                                      seedQuantity, stop, postOnly = true,
-                                      round = true, account = '1', confirm = false, _deps = {},
-                                  } = {}) {
-    if (!isFuturesLike(market)) throw new Error('placeLadder is futures-only');
-    const {sym, sd} = validateOrderInputs({symbol, side});
-    const loN = requireFinite(lo, 'lo'), hiN = requireFinite(hi, 'hi');
-    const n = Math.trunc(requireFinite(count, 'count'));
-    if (n < 1) throw new Error('count must be >= 1');
-    if ((totalNotional == null) === (totalQuantity == null)) throw new Error('pass exactly one of totalNotional or totalQuantity');
-    const deps = resolveDeps(account, _deps);
-    const paperTrading = usePaperTrading(_deps);
-    if (paperTrading) confirm = false; // global kill-switch
-    const lowP = Math.min(loN, hiN), highP = Math.max(loN, hiN);
-
-    // Hedge-mode positionSide resolution (mirrors placeOrder).
-    let ps = positionSide ? String(positionSide).toUpperCase() : null;
+/** Hedge-mode positionSide resolution for the ladder (mirrors placeOrder). */
+async function resolveLadderPositionSide({market, account, positionSide, confirm, deps}) {
+    const ps = positionSide ? String(positionSide).toUpperCase() : null;
     if (ps && !['LONG', 'SHORT', 'BOTH'].includes(ps)) throw new Error('positionSide must be LONG, SHORT, or BOTH');
     if (!ps && confirm) {
         const mode = await getPositionMode({market, account, _deps: deps});
         if (mode.hedgeMode) throw new Error('Account is in Hedge Mode — pass positionSide:"LONG" or "SHORT".');
     }
+    return ps;
+}
 
-    const info = round ? await getSymbolInfo({market, symbol: sym, _deps: deps}) : null;
-    const minQty = info ? Number(info.minQty) : 0;
-    const step = n > 1 ? (highP - lowP) / (n - 1) : 0;
-    const perNotional = totalNotional != null ? Number(totalNotional) / n : null;
-    const perQty = totalQuantity != null ? Number(totalQuantity) / n : null;
-
-    // Resolve a "min" seed to the smallest valid position for this symbol (LOT_SIZE minQty
-    // AND MIN_NOTIONAL), so set-and-forget ladders can rest a closePosition stop without
-    // over-seeding. We snap the notional-implied qty UP (never under-fill the min-notional).
-    let seedQty = seedQuantity;
-    if (typeof seedQuantity === 'string' && seedQuantity.trim().toLowerCase() === 'min') {
-        const si = info || await getSymbolInfo({market, symbol: sym, _deps: deps});
-        const mq = Number(si.minQty) || 0;
-        const mn = Number(si.minNotional) || 0;
-        const stp = Number(si.stepSize) || mq || 0;
-        let refPx = lowP; // conservative fallback: notional is qty×fillPrice, lower price ⇒ more qty needed
-        try {
-            const bt = await getBookTicker({market, symbol: sym, _deps: deps});
-            refPx = Number(bt.bidPrice) || Number(bt.askPrice) || lowP; // SELL seed fills near bid
-        } catch { /* ticker unavailable — fall back to lowP */
-        }
-        const byNotional = mn > 0 && refPx > 0 ? snap(mn / refPx, stp, 'ceil') : 0;
-        seedQty = Math.max(mq, byNotional);
-        if (!(seedQty > 0)) throw new Error('could not resolve a "min" seed — symbol filters unavailable; pass an explicit seedQuantity');
+/** Resolve a "min" seedQuantity to the smallest valid position for this symbol (LOT_SIZE minQty
+ *  AND MIN_NOTIONAL), so set-and-forget ladders can rest a closePosition stop without
+ *  over-seeding. Snaps the notional-implied qty UP (never under-fill the min-notional).
+ *  Any other seedQuantity value passes through unchanged. */
+async function resolveSeedQuantity({seedQuantity, market, sym, info, lowP, deps}) {
+    if (typeof seedQuantity !== 'string' || seedQuantity.trim().toLowerCase() !== 'min') return seedQuantity;
+    const si = info || await getSymbolInfo({market, symbol: sym, _deps: deps});
+    const mq = Number(si.minQty) || 0;
+    const mn = Number(si.minNotional) || 0;
+    const stp = Number(si.stepSize) || mq || 0;
+    let refPx = lowP; // conservative fallback: notional is qty×fillPrice, lower price ⇒ more qty needed
+    try {
+        const bt = await getBookTicker({market, symbol: sym, _deps: deps});
+        refPx = Number(bt.bidPrice) || Number(bt.askPrice) || lowP; // SELL seed fills near bid
+    } catch { /* ticker unavailable — fall back to lowP */
     }
+    const byNotional = mn > 0 && refPx > 0 ? snap(mn / refPx, stp, 'ceil') : 0;
+    const seedQty = Math.max(mq, byNotional);
+    // NaN-safe form of !(seedQty > 0): a NaN seed (broken filters) must also be rejected.
+    if (Number.isNaN(seedQty) || seedQty <= 0) throw new Error('could not resolve a "min" seed — symbol filters unavailable; pass an explicit seedQuantity');
+    return seedQty;
+}
 
+/** Build the ladder's rungs: prices evenly spaced across [lowP, highP] (snapped to tick),
+ *  per-rung qty from the notional or quantity split (snapped to step), dropping rungs
+ *  that floor below minQty. */
+function buildLadderRungs({n, lowP, step, perQty, perNotional, info, minQty}) {
     const rungs = [];
     let skipped = 0;
     for (let i = 0; i < n; i++) {
         let price = n > 1 ? lowP + step * i : lowP;
-        let qty = perQty != null ? perQty : perNotional / price;
+        let qty = perQty == null ? perNotional / price : perQty;
         if (info) {
             price = snap(price, info.tickSize, 'round');
             qty = snap(qty, info.stepSize, 'floor');
@@ -660,11 +723,11 @@ export async function placeLadder({
         rungs.push({price, qty});
     }
     if (!rungs.length) throw new Error('no valid rungs — every rung floored below minQty; raise totalNotional or lower count');
+    return {rungs, skipped};
+}
 
-    const totQty = rungs.reduce((s, r) => s + r.qty, 0);
-    const totNotional = rungs.reduce((s, r) => s + r.qty * r.price, 0);
-    const avgPrice = totNotional / totQty;
-    // Best-effort 3x-rule guard: compare the ladder's total notional to account equity.
+/** Best-effort 3x-rule guard: compare the ladder's total notional to account equity. */
+async function ladderLeverageGuard({market, account, totNotional, deps}) {
     let impliedAccountLeverage;
     const warnings = [];
     try {
@@ -675,30 +738,49 @@ export async function placeLadder({
         }
     } catch { /* equity unavailable — skip the guard */
     }
-    const plan = {
+    return {impliedAccountLeverage, warnings};
+}
+
+/** Assemble the ladder plan: totals, range, per-order sizing, seed/stop summary, warnings.
+ *  Shown verbatim in the dry-run preview and reused for the confirm-path totals. */
+function buildLadderPlan({
+                             market,
+                             sym,
+                             account,
+                             sd,
+                             ps,
+                             rungs,
+                             lowP,
+                             highP,
+                             perNotional,
+                             perQty,
+                             postOnly,
+                             seedQty,
+                             stop,
+                             totQty,
+                             totNotional,
+                             impliedAccountLeverage,
+                             skipped,
+                             warnings
+                         }) {
+    const avgPrice = totNotional / totQty;
+    return {
         market, symbol: sym, account, side: sd, positionSide: ps || undefined,
         rungs: rungs.length, range: {lo: lowP, hi: highP},
-        perOrder: perNotional != null ? `~$${perNotional.toFixed(2)}` : `${perQty} ${sym}`,
+        perOrder: perNotional == null ? `${perQty} ${sym}` : `~$${perNotional.toFixed(2)}`,
         totalQuantity: Number(totQty.toFixed(8)), totalNotional: Number(totNotional.toFixed(2)),
         avgPrice: Number(avgPrice.toFixed(2)), impliedAccountLeverage, skippedBelowMin: skipped,
         timeInForce: postOnly ? 'GTX (post-only)' : 'GTC',
         seed: seedQty ? {type: 'MARKET', quantity: seedQty} : undefined,
-        stop: stop != null ? {type: 'STOP_MARKET', closePosition: true, triggerPrice: stop} : undefined,
+        stop: stop == null ? undefined : {type: 'STOP_MARKET', closePosition: true, triggerPrice: stop},
         ...(warnings.length ? {warnings} : {}),
     };
+}
 
-    if (!confirm) {
-        return dryRunResponse({
-            paperTrading,
-            paperMsg: `PAPER TRADING — would place ${rungs.length} ladder rungs${seedQty ? ` + seed (${seedQty})` : ''}${stop != null ? ' + stop' : ''}; decision logged, nothing sent.`,
-            dryMsg: `DRY RUN — no orders sent. Pass confirm:true to place ${rungs.length} ladder rungs${seedQty ? ` + seed (${seedQty})` : ''}${stop != null ? ' + stop' : ''} (LIVE real funds).`,
-            tail: {
-                ladder_preview: plan,
-                sample_rungs: [...rungs.slice(0, 3), ...(rungs.length > 3 ? [rungs[rungs.length - 1]] : [])],
-            },
-        });
-    }
-
+/** Confirm path: 1) optional MARKET seed (opens the position so a stop has something to
+ *  guard), 2) optional protective closePosition stop, 3) the rungs via batchOrders
+ *  (5/request). Returns the raw per-step results for the response builder. */
+async function executeLadder({market, sym, sd, ps, rungs, seedQty, stop, postOnly, round, account, deps}) {
     // 1) optional seed market order — opens the position so a stop has something to guard.
     let seedResult;
     if (seedQty) {
@@ -744,6 +826,11 @@ export async function placeLadder({
     const rungResults = await batchPlaceOrders({market, orders: orderObjs, deps});
     const placed = rungResults.filter((r) => r && (r.orderId || r.clientOrderId)).length;
     const errors = rungResults.filter((r) => r && typeof r.code === 'number' && r.code < 0).map((r) => r.msg);
+    return {seedResult, stopResult, placed, errors};
+}
+
+/** Assemble the confirm-path response from the plan totals and execution results. */
+function buildLadderResult({market, sym, account, sd, ps, rungs, plan, warnings, seedResult, stopResult, placed, errors}) {
     return {
         success: true, market, symbol: sym, account, side: sd, positionSide: ps || undefined,
         placed, requested: rungs.length, failed: rungs.length - placed,
@@ -754,6 +841,84 @@ export async function placeLadder({
         errors: errors.length ? [...new Set(errors)].slice(0, 5) : undefined,
         ...(warnings.length ? {warnings} : {}),
     };
+}
+
+/**
+ * Scale into a position with a ladder of post-only LIMIT rungs evenly spaced across [lo, hi],
+ * optionally seeded with a MARKET order and guarded by a closePosition stop. DRY-RUN by default —
+ * returns the full plan and sends nothing unless confirm:true. On confirm: seed first, then the
+ * stop, then the rungs via batchOrders (5/request). Inherits post-only/hedge/precision rules.
+ * Provide exactly one of totalNotional (split evenly by $) or totalQuantity (split evenly by qty).
+ */
+export async function placeLadder({
+                                      market = 'futures', symbol, side, lo, hi, count = 10,
+                                      totalNotional, totalQuantity, positionSide,
+                                      seedQuantity, stop, postOnly = true,
+                                      round = true, account = '1', confirm = false, _deps = {},
+                                  } = {}) {
+    if (!isFuturesLike(market)) throw new Error('placeLadder is futures-only');
+    const {sym, sd} = validateOrderInputs({symbol, side});
+    const loN = requireFinite(lo, 'lo'), hiN = requireFinite(hi, 'hi');
+    const n = Math.trunc(requireFinite(count, 'count'));
+    if (n < 1) throw new Error('count must be >= 1');
+    if ((totalNotional == null) === (totalQuantity == null)) throw new Error('pass exactly one of totalNotional or totalQuantity');
+    const deps = resolveDeps(account, _deps);
+    const paperTrading = usePaperTrading(_deps);
+    if (paperTrading) confirm = false; // global kill-switch
+    const lowP = Math.min(loN, hiN), highP = Math.max(loN, hiN);
+
+    const ps = await resolveLadderPositionSide({market, account, positionSide, confirm, deps});
+
+    const info = round ? await getSymbolInfo({market, symbol: sym, _deps: deps}) : null;
+    const minQty = info ? Number(info.minQty) : 0;
+    const step = n > 1 ? (highP - lowP) / (n - 1) : 0;
+    const perNotional = totalNotional == null ? null : Number(totalNotional) / n;
+    const perQty = totalQuantity == null ? null : Number(totalQuantity) / n;
+
+    const seedQty = await resolveSeedQuantity({seedQuantity, market, sym, info, lowP, deps});
+    const {rungs, skipped} = buildLadderRungs({n, lowP, step, perQty, perNotional, info, minQty});
+
+    const totQty = rungs.reduce((s, r) => s + r.qty, 0);
+    const totNotional = rungs.reduce((s, r) => s + r.qty * r.price, 0);
+    const {impliedAccountLeverage, warnings} = await ladderLeverageGuard({market, account, totNotional, deps});
+    const plan = buildLadderPlan({
+        market,
+        sym,
+        account,
+        sd,
+        ps,
+        rungs,
+        lowP,
+        highP,
+        perNotional,
+        perQty,
+        postOnly,
+        seedQty,
+        stop,
+        totQty,
+        totNotional,
+        impliedAccountLeverage,
+        skipped,
+        warnings
+    });
+
+    const seedNote = seedQty ? ` + seed (${seedQty})` : '';
+    const stopNote = stop == null ? '' : ' + stop';
+    const sampleRungs = [...rungs.slice(0, 3), ...(rungs.length > 3 ? [rungs.at(-1)] : [])];
+    if (!confirm) {
+        return dryRunResponse({
+            paperTrading,
+            paperMsg: `PAPER TRADING — would place ${rungs.length} ladder rungs${seedNote}${stopNote}; decision logged, nothing sent.`,
+            dryMsg: `DRY RUN — no orders sent. Pass confirm:true to place ${rungs.length} ladder rungs${seedNote}${stopNote} (LIVE real funds).`,
+            tail: {
+                ladder_preview: plan,
+                sample_rungs: sampleRungs,
+            },
+        });
+    }
+
+    const {seedResult, stopResult, placed, errors} = await executeLadder({market, sym, sd, ps, rungs, seedQty, stop, postOnly, round, account, deps});
+    return buildLadderResult({market, sym, account, sd, ps, rungs, plan, warnings, seedResult, stopResult, placed, errors});
 }
 
 /**
@@ -831,6 +996,49 @@ export async function ensureProtectiveStop({market = 'futures', symbol, stop, po
     };
 }
 
+/** Shared mirror fan-out loop: walk the sizing plan in order, placing via `placeFn` per
+ *  account. The base account goes first; if it fails (or floors below minQty) every
+ *  remaining mirror is skipped so you never hold only a mirrored position. */
+async function runMirrorFanOut({sizing, base, symbol, confirm, skipNoun, placeFn}) {
+    const results = [];
+    let baseFailed = false;
+    for (const s of sizing) {
+        const isBase = s.account === base;
+        if (baseFailed) {
+            results.push({...s, skipped: `base ${skipNoun} failed — mirror not placed`});
+            continue;
+        }
+        if (s.belowMin) {
+            results.push({...s, skipped: `scaled quantity ${s.quantity} below minQty for ${symbol} — not placed on account ${s.account}`});
+            if (isBase) baseFailed = true;
+            continue;
+        }
+        let result;
+        try {
+            result = await placeFn(s);
+        } catch (err) {
+            result = {success: false, error: err.message};
+        }
+        results.push({...s, result});
+        if (isBase && confirm && result.success === false) baseFailed = true;
+    }
+    return results;
+}
+
+/** Shared mirror result envelope: success only when the base placed and nothing failed. */
+function buildMirrorResult({results, base, marginAsset, market, confirm, paperTrading}) {
+    const baseRes = results.find((r) => r.account === base);
+    const basePlaced = !!(baseRes && baseRes.result && baseRes.result.success);
+    const anyFailed = results.some((r) => r.result && r.result.success === false);
+    return {
+        success: confirm ? (basePlaced && !anyFailed) : false,
+        dry_run: !confirm, base, marginAsset, market,
+        ...paperFields(paperTrading),
+        note: 'Leverage/margin-type are NOT mirrored — set them per account (setLeverage/setMarginType with account).',
+        accounts: results,
+    };
+}
+
 /**
  * Mirror a single order across multiple accounts, sized by balance ratio.
  * Fan-out on placement: the base account (accounts[0]) places `quantity`; every other account
@@ -858,40 +1066,24 @@ export async function mirrorOrder({
 
     const sizing = await planMirrorSizing({accounts, marginAsset, market, symbol, baseQty, _deps});
     const base = accounts[0];
+    const results = await runMirrorFanOut({
+        sizing, base, symbol, confirm, skipNoun: 'order',
+        placeFn: (s) => placeOrder({...orderArgs, market, symbol, quantity: s.quantity, account: s.account, confirm, _deps}),
+    });
+    return buildMirrorResult({results, base, marginAsset, market, confirm, paperTrading});
+}
 
-    const results = [];
-    let baseFailed = false;
-    for (const s of sizing) {
-        const isBase = s.account === base;
-        if (baseFailed) {
-            results.push({...s, skipped: 'base order failed — mirror not placed'});
-            continue;
+/** Scale per-TP quantities by the mirror factor, snapped to the step size. */
+function scaleTakeProfits({takeProfits, factor, info}) {
+    return (takeProfits || []).map((tp) => {
+        const price = (tp && tp.price !== undefined) ? tp.price : tp;
+        if (tp && tp.quantity !== undefined) {
+            let q = Number(tp.quantity) * factor;
+            if (info) q = snap(q, info.stepSize, 'floor');
+            return {price, quantity: q};
         }
-        if (s.belowMin) {
-            results.push({...s, skipped: `scaled quantity ${s.quantity} below minQty for ${symbol} — not placed on account ${s.account}`});
-            if (isBase) baseFailed = true;
-            continue;
-        }
-        let result;
-        try {
-            result = await placeOrder({...orderArgs, market, symbol, quantity: s.quantity, account: s.account, confirm, _deps});
-        } catch (err) {
-            result = {success: false, error: err.message};
-        }
-        results.push({...s, result});
-        if (isBase && confirm && result.success === false) baseFailed = true;
-    }
-
-    const baseRes = results.find((r) => r.account === base);
-    const basePlaced = !!(baseRes && baseRes.result && baseRes.result.success);
-    const anyFailed = results.some((r) => r.result && r.result.success === false);
-    return {
-        success: confirm ? (basePlaced && !anyFailed) : false,
-        dry_run: !confirm, base, marginAsset, market,
-        ...paperFields(paperTrading),
-        note: 'Leverage/margin-type are NOT mirrored — set them per account (setLeverage/setMarginType with account).',
-        accounts: results,
-    };
+        return {price};
+    });
 }
 
 /**
@@ -918,48 +1110,42 @@ export async function mirrorBracket({
     } catch { /* placeBracket will still snap */
     }
 
-    const results = [];
-    let baseFailed = false;
-    for (const s of sizing) {
-        const isBase = s.account === base;
-        if (baseFailed) {
-            results.push({...s, skipped: 'base bracket failed — mirror not placed'});
-            continue;
-        }
-        if (s.belowMin) {
-            results.push({...s, skipped: `scaled quantity ${s.quantity} below minQty for ${symbol} — not placed on account ${s.account}`});
-            if (isBase) baseFailed = true;
-            continue;
-        }
-        const scaledTps = (takeProfits || []).map((tp) => {
-            const price = (tp && tp.price !== undefined) ? tp.price : tp;
-            if (tp && tp.quantity !== undefined) {
-                let q = Number(tp.quantity) * s.factor;
-                if (info) q = snap(q, info.stepSize, 'floor');
-                return {price, quantity: q};
-            }
-            return {price};
-        });
-        let result;
-        try {
-            result = await placeBracket({...bracketArgs, market, symbol, quantity: s.quantity, takeProfits: scaledTps, account: s.account, confirm, _deps});
-        } catch (err) {
-            result = {success: false, error: err.message};
-        }
-        results.push({...s, result});
-        if (isBase && confirm && result.success === false) baseFailed = true;
-    }
+    const results = await runMirrorFanOut({
+        sizing, base, symbol, confirm, skipNoun: 'bracket',
+        placeFn: (s) => placeBracket({
+            ...bracketArgs, market, symbol, quantity: s.quantity,
+            takeProfits: scaleTakeProfits({takeProfits, factor: s.factor, info}),
+            account: s.account, confirm, _deps,
+        }),
+    });
+    return buildMirrorResult({results, base, marginAsset, market, confirm, paperTrading});
+}
 
-    const baseRes = results.find((r) => r.account === base);
-    const basePlaced = !!(baseRes && baseRes.result && baseRes.result.success);
-    const anyFailed = results.some((r) => r.result && r.result.success === false);
-    return {
-        success: confirm ? (basePlaced && !anyFailed) : false,
-        dry_run: !confirm, base, marginAsset, market,
-        ...paperFields(paperTrading),
-        note: 'Leverage/margin-type are NOT mirrored — set them per account (setLeverage/setMarginType with account).',
-        accounts: results,
-    };
+/** Clear conditional (algo) orders for a symbol — they're a separate service since 2025-12-09.
+ *  USD-M only: COIN-M (dapi) has no Algo service as of 2026-06 (its stops are plain orders).
+ *  Best-effort: individual cancel failures are skipped. Returns the cancel count. */
+async function cancelOpenAlgoOrders({market, sym, deps}) {
+    let algoCanceled = 0;
+    try {
+        const a = await signedRequest({market, endpoint: `${futPrefix(market)}/v1/openAlgoOrders`, params: {symbol: sym}, _deps: deps});
+        const arr = Array.isArray(a) ? a : (a.orders || a.algoOrders || []);
+        for (const o of arr) {
+            if (o.algoId === undefined) continue;
+            try {
+                await signedRequest({
+                    market,
+                    method: 'DELETE',
+                    endpoint: `${futPrefix(market)}/v1/algoOrder`,
+                    params: {algoId: String(o.algoId)},
+                    _deps: deps
+                });
+                algoCanceled++;
+            } catch { /* skip */
+            }
+        }
+    } catch { /* no algo orders */
+    }
+    return algoCanceled;
 }
 
 /**
@@ -982,30 +1168,7 @@ export async function cancelAllOrders({market = 'futures', symbol, confirm = fal
     const deps = resolveDeps(account, _deps);
     if (isFuturesLike(market)) {
         const data = await signedRequest({market, method: 'DELETE', endpoint: `${futPrefix(market)}/v1/allOpenOrders`, params: {symbol: sym}, _deps: deps});
-        // Also clear conditional (algo) orders — they're a separate service since 2025-12-09.
-        // USD-M only: COIN-M (dapi) has no Algo service as of 2026-06 (its stops are plain orders).
-        let algoCanceled = 0;
-        if (isFutures(market)) {
-            try {
-                const a = await signedRequest({market, endpoint: `${futPrefix(market)}/v1/openAlgoOrders`, params: {symbol: sym}, _deps: deps});
-                const arr = Array.isArray(a) ? a : (a.orders || a.algoOrders || []);
-                for (const o of arr) {
-                    if (o.algoId === undefined) continue;
-                    try {
-                        await signedRequest({
-                            market,
-                            method: 'DELETE',
-                            endpoint: `${futPrefix(market)}/v1/algoOrder`,
-                            params: {algoId: String(o.algoId)},
-                            _deps: deps
-                        });
-                        algoCanceled++;
-                    } catch { /* skip */
-                    }
-                }
-            } catch { /* no algo orders */
-            }
-        }
+        const algoCanceled = isFutures(market) ? await cancelOpenAlgoOrders({market, sym, deps}) : 0;
         return {success: true, market, account, symbol: sym, response: data, algoCanceled};
     }
     const data = await signedRequest({market, method: 'DELETE', endpoint: '/api/v3/openOrders', params: {symbol: sym}, _deps: deps});

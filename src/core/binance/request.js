@@ -225,7 +225,8 @@ export async function signedRequest({market = 'futures', method = 'GET', endpoin
         ({res, data} = await attempt());
     }
     if (!res.ok || (data && data.code !== undefined && data.code < 0)) {
-        throw new Error(`Binance ${res.status}: ${data?.msg || JSON.stringify(data)}${data?.code ? ` (code ${data.code})` : ''}`);
+        const codeNote = data?.code ? ` (code ${data.code})` : '';
+        throw new Error(`Binance ${res.status}: ${data?.msg || JSON.stringify(data)}${codeNote}`);
     }
     return data;
 }
@@ -288,6 +289,8 @@ export function snap(value, step, mode = 'round') {
     const v = Number(value);
     const s = Number(step);
     if (!s || !Number.isFinite(s)) return v;
-    const n = mode === 'floor' ? Math.floor(v / s) : mode === 'ceil' ? Math.ceil(v / s) : Math.round(v / s);
+    const ROUNDERS = {floor: Math.floor, ceil: Math.ceil};
+    const rounder = ROUNDERS[mode] || Math.round;
+    const n = rounder(v / s);
     return Number((n * s).toFixed(stepDecimals(step)));
 }
