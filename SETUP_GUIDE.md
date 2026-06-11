@@ -5,7 +5,7 @@ This file is a step-by-step guide for Claude Code (or any LLM agent) to install 
 ## Step 1: Clone and Install
 
 ```bash
-git clone https://github.com/tradesdontlie/tradingview-mcp.git ~/tradingview-mcp
+git clone https://github.com/KajcsaErno/tradingview-mcp.git ~/tradingview-mcp
 cd ~/tradingview-mcp
 npm install
 ```
@@ -104,5 +104,5 @@ Then `tv status`, `tv quote`, `tv pine compile`, etc. work from anywhere.
 ## What to Read Next
 
 - `CLAUDE.md` — Decision tree for which tool to use when (auto-loaded by Claude Code)
-- `README.md` — Full tool reference (78 MCP tools, 30 CLI commands)
+- `README.md` — Full tool reference (151 MCP tools and the matching `tv` CLI commands)
 - `RESEARCH.md` — Research context and open questions

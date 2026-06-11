@@ -71,7 +71,7 @@ assert(js.includes('"\\u0027); alert('));  // Verify it's escaped
 ## Binance module (separate integration — NOT CDP)
 
 `src/core/binance.js` is an independent module that talks to the Binance REST API (signed HMAC-SHA256). It does **not** use CDP, `evaluate()`, `safeString()`,
-or `KNOWN_PATHS`. It is fully wired through all three layers (68 tools / 70 CLI subcommands):
+or `KNOWN_PATHS`. It is fully wired through all three layers (69 tools / 71 CLI subcommands):
 
 - **Core:** `src/core/binance.js`
 - **MCP:** `src/tools/binance.js` — `registerBinanceTools(server)`, registered in `src/server.js`. (Binance **is** exposed over MCP.)
