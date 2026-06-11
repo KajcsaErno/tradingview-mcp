@@ -29,3 +29,7 @@ drawings-backup-*.json
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Trend-rider bot runtime artifacts
+strategies/trend-rider-state.json
+strategies/trend-rider-log.jsonl
