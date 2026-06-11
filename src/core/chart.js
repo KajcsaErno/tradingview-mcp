@@ -1,8 +1,8 @@
 /**
  * Core chart control logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
-import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import {evaluate as _evaluate, evaluateAsync as _evaluateAsync, requireFinite, safeString} from '../connection.js';
+import {waitForChartReady as _waitForChartReady} from '../wait.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -86,7 +86,10 @@ export async function setType({ chart_type, _deps }) {
 
 export async function manageIndicator({ action, indicator, entity_id, inputs: inputsRaw, _deps }) {
   const { evaluate } = _resolve(_deps);
-  const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+    let inputs;
+    if (inputsRaw) {
+        inputs = typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw;
+    }
 
   if (action === 'add') {
     const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];

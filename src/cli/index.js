@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * tv — CLI for TradingView Desktop via Chrome DevTools Protocol.
+ * tv — CLI for TradingView Desktop (via Chrome DevTools Protocol) and the
+ * optional Binance trading module (`tv binance <sub>`, 70 subcommands).
  * Outputs JSON to stdout. Errors to stderr.
  * Exit codes: 0 success, 1 error, 2 connection failure.
  *
- * All 70 MCP tools are accessible via CLI commands.
+ * Covers the same core functions as the 150 MCP tools.
  * Pipe-friendly: every command outputs JSON for use with jq.
  */
 
@@ -29,5 +30,6 @@ import './commands/binance.js';
 import './commands/morning.js';
 
 // Run
-import { run } from './router.js';
+import {run} from './router.js';
+
 await run(process.argv);

@@ -1,7 +1,8 @@
-import { describe, it } from 'node:test';
+import {describe, it} from 'node:test';
 import assert from 'node:assert/strict';
-import { join, parse } from 'node:path';
-import { getSession, runBrief, saveSession } from '../src/core/morning.js';
+import {join, parse} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {getSession, runBrief, saveSession} from '../src/core/morning.js';
 
 // A path outside both PROJECT_ROOT and the user-data dir on any platform —
 // filesystem root + a folder that can't be inside the repo ('/outside-repo/...'
@@ -27,7 +28,9 @@ function makeMemoryFs() {
 describe('morning core', () => {
   it('runBrief scans watchlist symbols and restores original chart state', async () => {
     const fs = makeMemoryFs();
-    const rulesPath = 'E:/Dev/tradingview-mcp/rules.json';
+      // Inside the real repo root on any machine/OS — assertSafeRulesPath only
+      // allows paths under PROJECT_ROOT or the user-data dir.
+      const rulesPath = fileURLToPath(new URL('../rules.json', import.meta.url));
     fs.writeFileSync(rulesPath, JSON.stringify({
       watchlist: ['BTCUSD', 'ETHUSD'],
       default_timeframe: '240',

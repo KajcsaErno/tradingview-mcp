@@ -1,21 +1,21 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { registerHealthTools } from './tools/health.js';
-import { registerChartTools } from './tools/chart.js';
-import { registerPineTools } from './tools/pine.js';
-import { registerDataTools } from './tools/data.js';
-import { registerCaptureTools } from './tools/capture.js';
-import { registerDrawingTools } from './tools/drawing.js';
-import { registerAlertTools } from './tools/alerts.js';
-import { registerBatchTools } from './tools/batch.js';
-import { registerReplayTools } from './tools/replay.js';
-import { registerIndicatorTools } from './tools/indicators.js';
-import { registerWatchlistTools } from './tools/watchlist.js';
-import { registerUiTools } from './tools/ui.js';
-import { registerPaneTools } from './tools/pane.js';
-import { registerTabTools } from './tools/tab.js';
-import { registerBinanceTools } from './tools/binance.js';
-import { registerMorningTools } from './tools/morning.js';
+import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
+import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
+import {registerHealthTools} from './tools/health.js';
+import {registerChartTools} from './tools/chart.js';
+import {registerPineTools} from './tools/pine.js';
+import {registerDataTools} from './tools/data.js';
+import {registerCaptureTools} from './tools/capture.js';
+import {registerDrawingTools} from './tools/drawing.js';
+import {registerAlertTools} from './tools/alerts.js';
+import {registerBatchTools} from './tools/batch.js';
+import {registerReplayTools} from './tools/replay.js';
+import {registerIndicatorTools} from './tools/indicators.js';
+import {registerWatchlistTools} from './tools/watchlist.js';
+import {registerUiTools} from './tools/ui.js';
+import {registerPaneTools} from './tools/pane.js';
+import {registerTabTools} from './tools/tab.js';
+import {registerBinanceTools} from './tools/binance.js';
+import {registerMorningTools} from './tools/morning.js';
 
 const server = new McpServer(
   {
@@ -24,7 +24,7 @@ const server = new McpServer(
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 78 tools for reading and controlling a live TradingView Desktop chart.
+      instructions: `TradingView MCP — 150 tools: 82 for reading and controlling a live TradingView Desktop chart, plus 68 for direct Binance trading (separate module, no chart needed).
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -62,11 +62,15 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
-Binance trading (direct API, NOT via TradingView; needs BINANCE_API_KEY/SECRET in env or .env):
-- Reads: binance_get_balance, binance_get_positions, binance_get_open_orders, binance_get_ticker, binance_get_order_book, binance_get_symbol_info
-- Config: binance_set_leverage, binance_set_margin_type (futures)
-- Orders: binance_place_order, binance_place_bracket (entry+stop+TPs), binance_cancel_order, binance_cancel_all_orders
-- SAFETY: order/bracket/cancel-all are DRY-RUN previews unless confirm:true. NEVER pass confirm:true on the user's behalf — show the preview and let the user confirm. mainnet = real funds (set BINANCE_TESTNET=1 to route everything to testnet/paper; previews then show live_funds:false).
+Binance trading — 68 tools (direct API, NOT via TradingView; needs BINANCE_API_KEY/SECRET in env or .env):
+- Reads: binance_get_balance, binance_get_positions, binance_get_open_orders, binance_get_account_summary, binance_get_risk_report, binance_get_order_history, binance_get_income
+- Market data (public, no keys): binance_get_ticker, binance_get_klines, binance_get_order_book, binance_get_symbol_info, binance_get_24hr_ticker (all:true = screener), binance_compare_symbols, binance_watch_price
+- Technical analysis (computed off klines, no chart): binance_get_technicals (RSI/ATR/MACD/SMA/EMA/BB/VWAP), binance_get_signal (composite BUY/SELL/HOLD), binance_get_multi_timeframe (confluence), binance_scan_signals (screen a list), binance_detect_candlestick_patterns, binance_correlate_symbols
+- Backtesting (no orders): binance_backtest_strategy (9 strategies, Sharpe/Calmar/drawdown), binance_compare_strategies (rank all 9), binance_walk_forward_backtest (overfitting check)
+- Sizing & trade math (pure calc): binance_calc_position_size (entry+stop+risk budget → qty), binance_calc_expectancy, binance_estimate_losing_streak, binance_simulate_equity (Monte Carlo)
+- Config: binance_set_leverage, binance_set_margin_type, binance_set_position_mode (futures)
+- Orders: binance_place_order, binance_place_bracket (entry+stop+TPs), binance_place_ladder (scale-in rungs), binance_modify_order, binance_ensure_protective_stop, binance_cancel_order, binance_cancel_all_orders, binance_mirror_order/binance_mirror_bracket (multi-account), binance_transfer
+- SAFETY: all money-moving tools are DRY-RUN previews unless confirm:true. NEVER pass confirm:true on the user's behalf — show the preview and let the user confirm. mainnet = real funds (set BINANCE_TESTNET=1 to route everything to testnet/paper; previews then show live_funds:false).
 - Always check binance_get_symbol_info first to round price/quantity to tickSize/stepSize, or orders get rejected.
 
 CONTEXT MANAGEMENT:

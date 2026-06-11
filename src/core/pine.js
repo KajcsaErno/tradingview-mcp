@@ -3,7 +3,7 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import {evaluate, evaluateAsync, getClient} from '../connection.js';
 
 // ── Monaco finder (injected into TV page) ──
 const FIND_MONACO = `
@@ -75,19 +75,18 @@ export async function ensurePineEditorOpen() {
 
 // ── Pure / offline functions ──
 
-export function analyze({ source }) {
-  const lines = source.split('\n');
-  const diagnostics = [];
-
-  let isV6 = false;
+function detectPineV6(lines) {
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed.startsWith('//@version=6')) { isV6 = true; break; }
-    if (trimmed.startsWith('//@version=')) break;
+      if (trimmed.startsWith('//@version=6')) return true;
+      if (trimmed.startsWith('//@version=')) return false;
     if (trimmed === '' || trimmed.startsWith('//')) continue;
-    break;
+      return false;
   }
+    return false;
+}
 
+function collectArrayDecls(lines) {
   const arrays = new Map();
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -102,11 +101,14 @@ export function analyze({ source }) {
     const newMatch = line.match(/(\w+)\s*=\s*array\.new(?:<\w+>|_\w+)\((\d+)?/);
     if (newMatch) {
       const name = newMatch[1].trim();
-      const size = newMatch[2] !== undefined ? parseInt(newMatch[2], 10) : null;
+        const size = newMatch[2] === undefined ? null : parseInt(newMatch[2], 10);
       arrays.set(name, { name, size, line: i + 1 });
     }
   }
+    return arrays;
+}
 
+function checkArrayBounds(lines, arrays, diagnostics) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const pattern = /array\.(get|set)\(\s*(\w+)\s*,\s*(-?\d+)/g;
@@ -126,7 +128,9 @@ export function analyze({ source }) {
       }
     }
   }
+}
 
+function checkEmptyArrayAccess(lines, arrays, diagnostics) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const firstLastPattern = /(\w+)\.(first|last)\(\)/g;
@@ -144,7 +148,9 @@ export function analyze({ source }) {
       }
     }
   }
+}
 
+function checkStrategyDeclaration(lines, diagnostics) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
@@ -159,11 +165,13 @@ export function analyze({ source }) {
           message: 'strategy.entry/close used but no strategy() declaration found — did you mean to use indicator()?',
           severity: 'error',
         });
-        break;
+          return;
       }
     }
   }
+}
 
+function checkLegacyVersion(source, isV6, diagnostics) {
   if (!isV6 && source.includes('//@version=')) {
     const vMatch = source.match(/\/\/@version=(\d+)/);
     if (vMatch && parseInt(vMatch[1]) < 5) {
@@ -174,6 +182,18 @@ export function analyze({ source }) {
       });
     }
   }
+}
+
+export function analyze({source}) {
+    const lines = source.split('\n');
+    const diagnostics = [];
+
+    const isV6 = detectPineV6(lines);
+    const arrays = collectArrayDecls(lines);
+    checkArrayBounds(lines, arrays, diagnostics);
+    checkEmptyArrayAccess(lines, arrays, diagnostics);
+    checkStrategyDeclaration(lines, diagnostics);
+    checkLegacyVersion(source, isV6, diagnostics);
 
   return {
     success: true,
@@ -181,6 +201,29 @@ export function analyze({ source }) {
     diagnostics,
     note: diagnostics.length === 0 ? 'No static analysis issues found. Use pine_compile or pine_smart_compile for full server-side compilation check.' : undefined,
   };
+}
+
+// Flattens the pine-facade translate_light payload into {errors, warnings} lists.
+function collectCheckDiagnostics(result) {
+    const errors = [];
+    const warnings = [];
+    const inner = result?.result;
+
+    for (const e of inner?.errors2 || []) {
+        errors.push({
+            line: e.start?.line, column: e.start?.column,
+            end_line: e.end?.line, end_column: e.end?.column,
+            message: e.message,
+        });
+    }
+    for (const w of inner?.warnings2 || []) {
+        warnings.push({line: w.start?.line, column: w.start?.column, message: w.message});
+    }
+
+    if (result.error && typeof result.error === 'string') {
+        errors.push({message: result.error});
+    }
+    return {errors, warnings};
 }
 
 export async function check({ source }) {
@@ -205,30 +248,7 @@ export async function check({ source }) {
   }
 
   const result = await response.json();
-  const errors = [];
-  const warnings = [];
-  const inner = result?.result;
-
-  if (inner) {
-    if (inner.errors2 && inner.errors2.length > 0) {
-      for (const e of inner.errors2) {
-        errors.push({
-          line: e.start?.line, column: e.start?.column,
-          end_line: e.end?.line, end_column: e.end?.column,
-          message: e.message,
-        });
-      }
-    }
-    if (inner.warnings2 && inner.warnings2.length > 0) {
-      for (const w of inner.warnings2) {
-        warnings.push({ line: w.start?.line, column: w.start?.column, message: w.message });
-      }
-    }
-  }
-
-  if (result.error && typeof result.error === 'string') {
-    errors.push({ message: result.error });
-  }
+    const {errors, warnings} = collectCheckDiagnostics(result);
 
   const compiled = errors.length === 0;
   return {

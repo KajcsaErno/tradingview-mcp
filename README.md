@@ -112,6 +112,80 @@ Why these are good:
 - You learn the core chart controls fast.
 - You get useful output immediately without writing code.
 
+## Guided demo (show it off / play around)
+
+Copy any block below straight into Claude. They are ordered as a tour of the most impressive things the project can do.
+
+> [!TIP]
+> **No Binance keys? You can still play with a lot.** All Binance *public market data*, *technical analysis*, *backtesting*, and *risk math* (`klines`,
+`technicals`, `signal`, `backtest`, `compare-strategies`, `expectancy`, `simulate-equity`, …) need **no API keys and touch no funds**. Only account reads and
+> order placement require keys. The chart tools just need TradingView Desktop open with the debug port.
+
+### Pillar 1 — "Claude is driving my actual chart"
+
+The headline feature: it controls your live TradingView Desktop app over Chrome DevTools Protocol — no screen-scraping, no separate data feed.
+
+```text
+Use chart_get_state, data_get_study_values, and quote_get, then explain my chart in plain English.
+```
+
+```text
+Switch to ES1! on the 5-minute and add RSI and Bollinger Bands.
+```
+
+The unique one — read what custom Pine indicators draw (`line.new()` / `label.new()` / `table.new()` output like PDH levels, settlement, bias labels) that is
+invisible to normal data tools:
+
+```text
+Use data_get_pine_lines and data_get_pine_labels and list the key levels on my chart.
+```
+
+### Pillar 2 — Pine Script write → compile → fix loop
+
+```text
+Write a Pine indicator that plots the daily VWAP with a label, set it with pine_set_source, compile it, and fix any errors.
+```
+
+### Pillar 3 — Replay = backtesting by hand
+
+```text
+Start replay on 2025-03-01 and walk me through trading it one bar at a time.
+```
+
+### Pillar 4 — Binance analysis (no keys, no risk)
+
+```text
+Run binance_get_signal on BTCUSDC 1h and explain the score.
+```
+
+```text
+Backtest the ema_cross strategy on BTCUSDC 1h, then run compare-strategies and tell me which of the 9 ranks best.
+```
+
+```text
+What's the longest losing streak I should expect at a 55% win rate over 200 trades?
+```
+
+### Pillar 5 — The safety story (the trust-builder)
+
+Orders are dry-run by default — this returns a preview and sends nothing:
+
+```text
+Preview a Binance bracket order on BTCUSDC (do NOT confirm it), then explain what it would do.
+```
+
+Plus a global `PAPER_TRADING=true` kill-switch forces every money-mover to preview only even with `--confirm`, and hard rules are baked in (3x leverage cap,
+post-only/maker by default, USDC pairs only).
+
+### Pillar 6 — Two interfaces, one core
+
+Every capability is both an MCP tool (Claude talks to it) and a `tv` CLI command (pipe-friendly, JSONL streaming). Live market data as JSONL you can pipe
+anywhere:
+
+```text
+Stream live trades and book-ticker for BTCUSDC and ETHUSDC and summarize what you see.
+```
+
 ## TradingView tools: what each tool group does, why it is good, and examples
 
 | Tool group | What you can do | Why it is good | Example |
@@ -167,6 +241,9 @@ Notes:
 
 - `BINANCE_TESTNET=1` routes requests to Binance testnet hosts.
 - `PAPER_TRADING=true` forces money-moving commands to preview only, even if `--confirm` is passed.
+
+For a full first-time walkthrough (API-key permissions, key troubleshooting, the safety
+rails, and a dry-run → confirm first-order example), see [docs/BINANCE_SETUP.md](docs/BINANCE_SETUP.md).
 
 ## Binance tools: what each tool group does, why it is good, and examples
 

@@ -1,5 +1,7 @@
 import js from '@eslint/js';
 import globals from 'globals';
+import sonarjs from 'eslint-plugin-sonarjs';
+import unicorn from 'eslint-plugin-unicorn';
 
 export default [
   {
@@ -33,6 +35,30 @@ export default [
     },
   },
   {
+      // Stricter quality rules on the source tree (parity with SonarLint/IDE
+      // inspections): complexity caps, no nested ternaries/templates, modern
+      // idioms. Tests and scripts are deliberately exempt.
+      files: ['src/**/*.js'],
+      plugins: {sonarjs, unicorn},
+      rules: {
+          'sonarjs/cognitive-complexity': ['error', 15],
+          'sonarjs/no-nested-conditional': 'error',
+          'sonarjs/no-nested-template-literals': 'error',
+          'sonarjs/no-identical-functions': 'error',
+          'sonarjs/no-nested-functions': 'error',
+          'sonarjs/no-ignored-exceptions': 'error',
+          'sonarjs/no-inverted-boolean-check': 'error',
+          'unicorn/no-negated-condition': 'error',
+          'unicorn/prefer-at': 'error',
+          'unicorn/no-zero-fractions': 'error',
+          'unicorn/prefer-set-has': 'error',
+          'unicorn/prefer-native-coercion-functions': 'error',
+          'unicorn/prefer-code-point': 'error',
+          'unicorn/prefer-math-min-max': 'error',
+          'unicorn/catch-error-name': ['error', {name: 'err'}],
+      },
+  },
+    {
     // The path-traversal sanitizer regex /[\/\\]/g is pinned by
     // tests/sanitization.test.js as an exact source string — keep the escape.
     files: ['src/core/capture.js', 'src/core/batch.js'],

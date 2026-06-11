@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-146 MCP tools total (and matching `tv` CLI commands): **82 for reading and controlling a live TradingView Desktop chart** via Chrome DevTools Protocol on `localhost:9222` (including the rules-based **morning workflow** module — `morning_brief` / `session_save` / `session_get`), plus **64 in the separate Binance trading module**. Two consumers, one core: an MCP server (stdio) and a pipe-friendly CLI.
+150 MCP tools total (and matching `tv` CLI commands): **82 for reading and controlling a live TradingView Desktop chart** via Chrome DevTools Protocol on
+`localhost:9222` (including the rules-based **morning workflow** module — `morning_brief` / `session_save` / `session_get`), plus **68 in the separate Binance
+trading module**. Two consumers, one core: an MCP server (stdio) and a pipe-friendly CLI.
 
-There is also a **separate, optional Binance trading module** (`src/core/binance.js` + `tv binance` + `binance_*` MCP tools — 64 tools / 66 CLI subcommands) that talks directly to Binance's signed REST API with the user's own API keys. It is **independent of the TradingView/CDP layer** (no chart involved) and can place **real orders**. See "Binance module" below before touching it.
+There is also a **separate, optional Binance trading module** (`src/core/binance.js` + `tv binance` + `binance_*` MCP tools — 68 tools / 70 CLI subcommands)
+that talks directly to Binance's signed REST API with the user's own API keys. It is **independent of the TradingView/CDP layer** (no chart involved) and can
+place **real orders**. See "Binance module" below before touching it.
 
 ## Development Commands
 
@@ -15,7 +19,7 @@ npm install                        # zero-config, only @modelcontextprotocol/sdk
 npm start                          # run MCP server (stdio)
 npm run tv -- <command>            # run CLI (or `node src/cli/index.js`)
 
-npm test                           # full OFFLINE suite — no TradingView needed (pine_analyze + cli + morning + binance + sanitization + replay)
+npm test                           # full OFFLINE suite — no TradingView needed; auto-discovers tests/*.test.js (a new test file runs automatically; the live-only e2e suite is tests/e2e.live.js, deliberately NOT *.test.js so discovery skips it)
 npm run test:unit                  # same offline suite as `npm test`
 npm run test:cli                   # CLI router tests
 npm run test:e2e                   # full e2e (REQUIRES live TradingView on :9222)
@@ -82,7 +86,8 @@ The codebase is a strict three-layer fan-out from a single core. **All TradingVi
 1. Add the function to the right `src/core/*.js` module with the `_deps` DI parameter and `safeString`/`requireFinite` on every user input.
 2. Register an MCP wrapper in the matching `src/tools/*.js` with a Zod schema.
 3. Add a CLI subcommand in `src/cli/commands/*.js` mapping flags → the core function.
-4. Add e2e coverage in `tests/e2e.test.js` and (if the function builds JS from user input) a sanitization test in `tests/sanitization.test.js` that asserts on the generated expression string via `_deps`.
+4. Add e2e coverage in `tests/e2e.live.js` and (if the function builds JS from user input) a sanitization test in `tests/sanitization.test.js` that asserts on
+   the generated expression string via `_deps`.
 
 ### Other things worth knowing
 
@@ -151,6 +156,23 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 5. `replay_status` → check position, P&L, current date
 6. `replay_stop` → return to realtime
 
+### "Size a position / plan my risk" (Binance module, pure math — no orders)
+
+- `binance_calc_position_size` → entry + stop (explicit or ATR-derived) + risk budget → qty/notional/margin (warns past the 3x rule)
+- `binance_get_symbol_info` → tickSize/stepSize for rounding
+- `binance_calc_expectancy` → win rate + R:R → expectancy, break-even win rate, $/% projections
+- `binance_estimate_losing_streak` → longest expected losing streak + implied drawdown
+- `binance_simulate_equity` → Monte Carlo over win rate/R:R/risk-% → drawdown & ruin percentiles
+
+### "Backtest or evaluate a strategy" (Binance module, klines-based — no chart, no orders)
+
+- `binance_backtest_strategy` → one of 9 strategies, institutional metrics (Sharpe, Calmar, max DD, profit factor)
+- `binance_compare_strategies` → rank all 9 off one klines fetch
+- `binance_walk_forward_backtest` → out-of-sample consistency check (overfitting verdict)
+- `binance_get_signal` → composite weighted BUY/SELL/HOLD with confidence + reasons
+- `binance_get_multi_timeframe` → trend confluence across 15m/1h/4h/1d
+- `binance_scan_signals` → screen a symbol list for oversold/overbought/breakout etc.
+
 ### "Screen multiple symbols"
 - `batch_run` with `symbols: ["ES1!", "NQ1!", "YM1!"]` and `action: "screenshot"`, `"get_ohlcv"`, or `"get_strategy_results"` (reads Strategy Tester metrics from DOM)
 
@@ -212,11 +234,22 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - OHLCV capped at 500 bars, trades at 20 per request
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
 
-## Binance module (`src/core/binance.js`)
+## Binance module (`src/core/binance.js` + `src/core/binance/`)
 
-Separate from everything above — it does **not** use CDP, `evaluate()`, `safeString`, or `KNOWN_PATHS`. It signs Binance REST calls with HMAC-SHA256 using keys from a **gitignored `.env`** (`BINANCE_API_KEY`/`BINANCE_API_SECRET`, plus `_2`/`_3`… for more accounts; `BINANCE_TESTNET_API_KEY`/`_SECRET`… for testnet), loaded by a tiny zero-dep parser. Like the rest of core, every function takes `_deps` for DI — here `{ fetch, now, keys, sleep, testnet, paperTrading }` — which `tests/binance.test.js` injects to assert on the exact requests built (no network). **203 unit tests**; run `npm run test:binance` (or `node --test tests/binance.test.js`).
+Separate from everything above — it does **not** use CDP, `evaluate()`, `safeString`, or `KNOWN_PATHS`. `src/core/binance.js` is the public **barrel** (the
+stable import surface — always import from it, never from the submodules); the implementation lives in `src/core/binance/`: `request.js` (signing, hosts,
+testnet/paper switches, market helpers, snap/precision), `account.js` (balances, positions, risk, config, transfers), `orders.js` (place/modify/cancel/mirror +
+sizing), `market.js` (public market data, streams, symbol info), `analysis.js` (indicators, backtester, planners). Import graph is acyclic:
+`request ← {account, market} ← analysis ← orders`. It signs Binance REST calls with HMAC-SHA256 using keys from a **gitignored `.env`** (`BINANCE_API_KEY`/
+`BINANCE_API_SECRET`, plus `_2`/`_3`… for more accounts; `BINANCE_TESTNET_API_KEY`/`_SECRET`… for testnet), loaded by a tiny zero-dep parser. Like the rest of
+core, every function takes `_deps` for DI — here `{ fetch, now, keys, sleep, testnet, paperTrading }` — which the `tests/binance-*.test.js` suites inject to
+assert on the exact requests built (no network; shared fixtures in `tests/_binance_helpers.js`). Run `npm run test:binance` (or
+`node --test "tests/binance-*.test.js"`).
 
-Surfaces: core in `src/core/binance.js`, MCP wrappers in `src/tools/binance.js` (registered in `server.js`), CLI in `src/cli/commands/binance.js` (`tv binance <sub>`). **64 tools / 66 CLI subcommands** (61 are shared; the 5 CLI-only subcommands are the three long-running WS/poll loops — `stream`, `user-stream`, `market-stream` — plus the `agg-trades` and `historical` public reads that were never wrapped for MCP; conversely the listenKey-lifecycle tools `start_user_stream`/`keepalive_user_stream`/`close_user_stream` are MCP-only, exposed via the `user-stream` loop on the CLI), grouped:
+Surfaces: core barrel in `src/core/binance.js` (implementation in `src/core/binance/`), MCP wrappers in `src/tools/binance.js` (registered in `server.js`), CLI
+in `src/cli/commands/binance.js` (`tv binance <sub>`). **68 tools / 70 CLI subcommands** (65 are shared; the 5 CLI-only subcommands are the three long-running
+WS/poll loops — `stream`, `user-stream`, `market-stream` — plus the `agg-trades` and `historical` public reads that were never wrapped for MCP; conversely the
+listenKey-lifecycle tools `start_user_stream`/`keepalive_user_stream`/`close_user_stream` are MCP-only, exposed via the `user-stream` loop on the CLI), grouped:
 - **Reads:** `getBalance`, `getAccountSummary`, `getAccountSnapshot`, `getRiskReport`, `getPositions`, `getOpenOrders`, `getOrder`, `getOrderHistory`, `getIncome`, `getLiquidationHistory`, `getAccountTrades`, `getPositionMode`, `getLeverageBrackets`, `getCommissionRate`, `getServerTime`. `getLiquidationHistory` (signed, futures-only `/{fapi,dapi}/v1/forceOrders`) is the backward-looking record of the user's OWN force-closed (LIQUIDATION/ADL) positions — the complement to `getRiskReport`'s forward-looking distance-to-liq.
 - **Market data (public, unsigned):** `getTicker`, `getKlines`, `getUiKlines`*, `get24hrTicker`, `getBookTicker`, `getTradingDayTicker`*, `getFundingRate`, `getAvgPrice`*, `getRollingWindowTicker`*, `getOrderBook`, `getSymbolInfo`, `getRecentTrades`, `getAggTrades`, `getHistoricalTrades`, `watchPrice` (*spot-only). `watchPrice` is a **bounded** live-WS capture (subscribes to `<symbol>@aggTrade` for `durationSec` ∈ [1,60], default 10) that returns a single OHLC/VWAP/volume/tick-count summary — the request/response counterpart to the unbounded `tv binance stream` loop, for answering "what's price doing right now?". `get24hrTicker`/`getBookTicker` take `all:true` (+ optional `quote:"USDC"` filter) for a one-call market screener; `getRollingWindowTicker`/`getTradingDayTicker` take a `symbols` list (Binance has no bare "all" for those). `compareSymbols` takes a `symbols` list and returns a ranked side-by-side table (sorted by `sortBy`: priceChangePercent default / priceChange / quoteVolume / volume / lastPrice) + leader/laggard — fans out one `get24hrTicker` per symbol, works on spot/futures/coinm.
 - **Technical analysis (computed off klines, public — no chart):** `getTechnicals` and `correlateSymbols`. `getTechnicals(symbol, interval)` pulls klines for the exact contract and computes RSI(14), ATR(14), MACD(12/26/9), SMA(20/50/200), EMA(12/26/50), Bollinger(20,2), window VWAP, and a coarse trend/momentum `classification` (bullish/bearish/neutral + overbought/oversold) — indicators without enough bars return `null` instead of throwing. Its ATR also backs `calcPositionSize` (see Sizing). `correlateSymbols(symbols, interval)` is the **heavier, klines-based** complement to `compareSymbols`: per-symbol window return %, per-bar volatility, a Sharpe-like ratio, ATR %, RSI and trend, **plus a Pearson correlation matrix** of close-to-close returns and return/volatility rankings — for portfolio-risk checks (don't stack correlated positions across accounts) and ranking a shortlist. One klines call per symbol, capped at 10 — pass a focused list, not the whole market. Indicator math is in pure, null-safe helpers (`sma`/`ema`/`rsi`/`atr`/`macd`/`bollinger`/`vwap`/`pearson`/`stddev`). Ideas borrowed from `CarlosIrineuCosta/binance-mcp-enhanced`.
@@ -231,9 +264,19 @@ Surfaces: core in `src/core/binance.js`, MCP wrappers in `src/tools/binance.js` 
 - **Post-only by default:** LIMIT orders → `GTX` (futures) / `LIMIT_MAKER` (spot). Taker-only types (`MARKET`, `STOP_MARKET`, `TAKE_PROFIT_MARKET`) throw unless `allowTaker: true`.
 - **Hedge mode:** the user's account is in Hedge Mode — futures orders need `positionSide` (LONG/SHORT) and must NOT send `reduceOnly`. `placeOrder` auto-detects on confirm and refuses to guess; `placeBracket` derives `positionSide` from `side`.
 - **Precision:** price/qty snap to tickSize/stepSize via `exchangeInfo` (`round` default true).
-- **Conditional orders use the Algo endpoint (Binance migration, 2025-12-09):** USD-M `STOP/STOP_MARKET/TAKE_PROFIT/TAKE_PROFIT_MARKET/TRAILING_STOP_MARKET` are rejected by `POST /fapi/v1/order` with `-4120` and must POST to `/fapi/v1/algoOrder` with `algoType=CONDITIONAL` and **`triggerPrice`** (not `stopPrice`). `placeOrder`/`placeBracket` auto-route these (`useAlgo = isStop && isFutures`). `getOpenOrders` merges `openAlgoOrders`; `cancelAlgoOrder(algoId)` + `cancelAllOrders` clear them. Plain LIMIT/MARKET still use `/fapi/v1/order`. COIN-M conditional routing is NOT yet migrated in code (still `/dapi/v1/order`).
+- **Conditional orders use the Algo endpoint (Binance migration, 2025-12-09):** USD-M `STOP/STOP_MARKET/TAKE_PROFIT/TAKE_PROFIT_MARKET/TRAILING_STOP_MARKET` are
+  rejected by `POST /fapi/v1/order` with `-4120` and must POST to `/fapi/v1/algoOrder` with `algoType=CONDITIONAL` and **`triggerPrice`** (not `stopPrice`).
+  `placeOrder`/`placeBracket` auto-route these (`useAlgo = isStop && isFutures`). `getOpenOrders` merges `openAlgoOrders`; `cancelAlgoOrder(algoId)` +
+  `cancelAllOrders` clear them. Plain LIMIT/MARKET still use `/fapi/v1/order`. COIN-M conditionals correctly still use `/dapi/v1/order` — Binance has NOT
+  migrated dapi (verified against the official change log 2026-06); a `-4120` fallback (`isAlgoMigrationError` + `toAlgoParams`) auto-retries on
+  `/dapi/v1/algoOrder` and tags the response `algo_fallback:true` if Binance ever migrates it.
 - **Clock skew & rate limits:** `signedRequest` applies a server-time offset and retries once on `-1021`; it also retries `429`/`418` with `Retry-After`/exponential backoff (sleep injectable via `_deps.sleep`).
-- **Per-account key routing (do not regress):** EVERY signed or account-specific function takes `account` and resolves keys via `resolveDeps(account, _deps)`, then passes `_deps: deps` to `signedRequest`. A function that omits `account` silently falls back to account 1's keys (`getKeys()`), which is a dangerous bug — e.g. cancelling/transferring on the wrong account. This was fixed across `getPositionMode`, `setPositionMode`, `setLeverage`, `setMarginType`, `getCommissionRate`, `getOrder`, `cancelOrder`, `cancelAlgoOrder`, `getAccountTrades`, `getHistoricalTrades`, `getOrderHistory`, `transfer`, `getTransferHistory` (+ all new tools). `tests/binance.test.js` "account routing" suite injects a `getKeys` spy to assert each routes the requested account. The CLI/MCP wrappers must forward `account`/`o.account` too.
+- **Per-account key routing (do not regress):** EVERY signed or account-specific function takes `account` and resolves keys via `resolveDeps(account, _deps)`,
+  then passes `_deps: deps` to `signedRequest`. A function that omits `account` silently falls back to account 1's keys (`getKeys()`), which is a dangerous
+  bug — e.g. cancelling/transferring on the wrong account. This was fixed across `getPositionMode`, `setPositionMode`, `setLeverage`, `setMarginType`,
+  `getCommissionRate`, `getOrder`, `cancelOrder`, `cancelAlgoOrder`, `getAccountTrades`, `getHistoricalTrades`, `getOrderHistory`, `transfer`,
+  `getTransferHistory` (+ all new tools). The "account routing" suite (in `tests/binance-*.test.js`) injects a `getKeys` spy to assert each routes the requested
+  account. The CLI/MCP wrappers must forward `account`/`o.account` too.
 - **Laddered scale-in:** `placeLadder` builds N evenly-spaced post-only LIMIT rungs across `[lo,hi]` from `totalNotional` OR `totalQuantity` (exactly one), with optional `seedQuantity` (MARKET) and `stop` (closePosition STOP_MARKET). DRY-RUN by default; on confirm it places seed → stop (delegated to `placeOrder`) then the rungs via `batchPlaceOrders` (futures `/batchOrders`, 5/request). Inherits hedge/precision rules. **A `stop` with no seed fails (Binance `-4509`): a closePosition stop has nothing to guard until a position exists.** Pass `seedQuantity: 'min'` (CLI `--seed min`) to open the smallest valid position first — it resolves from the symbol's `minQty` AND `minNotional` (notional snapped UP via `snap(..., 'ceil')`, priced off the current bid), so a set-and-forget ladder's stop can rest immediately without over-seeding.
 - **Protective-stop helper:** `ensureProtectiveStop` is idempotent — if a closePosition STOP already rests it does nothing; else (and only if a position exists) it places one. Dry-run unless confirm.
 - **Isolated-margin adjustment:** `adjustIsolatedMargin` (`binance_adjust_isolated_margin` / `tv binance adjust-margin`) adds/removes collateral on an ISOLATED position via `POST /fapi|/dapi /v1/positionMargin` (`type` 1=add, 2=remove) to move the liquidation price WITHOUT closing — pairs with `getRiskReport`. Dry-run unless confirm; Hedge Mode requires `positionSide` (it refuses to guess, like `placeOrder`); futures-only (USD-M + COIN-M). Idea borrowed from `muvon/mcp-binance-futures`.

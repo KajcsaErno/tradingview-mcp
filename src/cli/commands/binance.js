@@ -1,9 +1,29 @@
-import { register } from '../router.js';
+import {register} from '../router.js';
 import * as core from '../../core/binance.js';
 
 const marketOpt = { type: 'string', short: 'm', description: 'spot | futures (USD-M) | coinm (COIN-M, qty in contracts) | *-testnet (default futures)' };
 const accountOpt = { type: 'string', description: 'API key set: "1" (primary, BINANCE_API_KEY) or "2"/"3"… (BINANCE_API_KEY_2…). Default 1.' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const num = (v) => (v === undefined ? undefined : Number(v));
+const parseSeedQuantity = (seed) => {
+    if (seed === undefined) return undefined;
+    if (String(seed).trim().toLowerCase() === 'min') return 'min';
+    return Number(seed);
+};
+const parseTakeProfits = (tp) => {
+    let raw = [];
+    if (Array.isArray(tp)) raw = tp;
+    else if (tp) raw = [tp];
+    return raw.map((s) => {
+        const [p, q] = String(s).split(':');
+        return {price: Number(p), quantity: num(q)};
+    });
+};
+const hedgeFlag = (hedge, oneWay) => {
+    if (hedge) return true;
+    if (oneWay) return false;
+    return undefined;
+};
 
 register('binance', {
   description: 'Binance account: balance, positions, orders (direct API, not via TradingView)',
@@ -52,12 +72,12 @@ register('binance', {
       },
       handler: (o) => core.calcPositionSize({
         market: o.market || 'futures', symbol: o.symbol, entry: Number(o.entry),
-        stop: o.stop !== undefined ? Number(o.stop) : undefined,
-        side: o.side, atrMult: o.atrMult !== undefined ? Number(o.atrMult) : undefined, interval: o.interval || '1h',
-        leverage: o.leverage !== undefined ? Number(o.leverage) : undefined,
-        riskAmount: o.riskAmount !== undefined ? Number(o.riskAmount) : undefined,
-        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
-        balance: o.balance !== undefined ? Number(o.balance) : undefined,
+          stop: num(o.stop),
+          side: o.side, atrMult: num(o.atrMult), interval: o.interval || '1h',
+          leverage: num(o.leverage),
+          riskAmount: num(o.riskAmount),
+          riskPct: num(o.riskPct),
+          balance: num(o.balance),
         round: !o.noRound, account: o.account,
       }),
     }],
@@ -73,10 +93,10 @@ register('binance', {
       },
       handler: (o) => core.calcExpectancy({
         winRate: Number(o.winRate), rrRatio: Number(o.rrRatio),
-        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
-        riskAmount: o.riskAmount !== undefined ? Number(o.riskAmount) : undefined,
-        balance: o.balance !== undefined ? Number(o.balance) : undefined,
-        trades: o.trades !== undefined ? Number(o.trades) : undefined,
+          riskPct: num(o.riskPct),
+          riskAmount: num(o.riskAmount),
+          balance: num(o.balance),
+          trades: num(o.trades),
       }),
     }],
     ['losing-streak', {
@@ -88,8 +108,8 @@ register('binance', {
       },
       handler: (o) => core.estimateLosingStreak({
         winRate: Number(o.winRate),
-        sampleSize: o.sampleSize !== undefined ? Number(o.sampleSize) : undefined,
-        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
+          sampleSize: num(o.sampleSize),
+          riskPct: num(o.riskPct),
       }),
     }],
     ['simulate-equity', {
@@ -106,12 +126,12 @@ register('binance', {
       },
       handler: (o) => core.simulateEquity({
         winRate: Number(o.winRate), rrRatio: Number(o.rrRatio),
-        riskPct: o.riskPct !== undefined ? Number(o.riskPct) : undefined,
-        startBalance: o.startBalance !== undefined ? Number(o.startBalance) : undefined,
-        trades: o.trades !== undefined ? Number(o.trades) : undefined,
-        runs: o.runs !== undefined ? Number(o.runs) : undefined,
+          riskPct: num(o.riskPct),
+          startBalance: num(o.startBalance),
+          trades: num(o.trades),
+          runs: num(o.runs),
         compounding: !o.noCompounding,
-        ruinDrawdownPct: o.ruinDrawdownPct !== undefined ? Number(o.ruinDrawdownPct) : undefined,
+          ruinDrawdownPct: num(o.ruinDrawdownPct),
       }),
     }],
     ['stream', {
@@ -130,8 +150,11 @@ register('binance', {
         let prev = null;
         for (;;) {
           let cur;
-          try { cur = await snap(); }
-          catch (e) { console.log(JSON.stringify({ time: new Date().toISOString(), error: e.message })); await sleep(interval); continue; }
+          try { cur = await snap(); } catch (err) {
+              console.log(JSON.stringify({time: new Date().toISOString(), error: err.message}));
+              await sleep(interval);
+              continue;
+          }
           const key = JSON.stringify({ p: cur.positions, oo: cur.openOrders, ao: cur.openAlgoOrders, mr: cur.marginRatio, pnl: cur.totalUnrealizedPnl });
           if (key !== prev) { prev = key; console.log(JSON.stringify({ time: new Date().toISOString(), ...cur })); }
           await sleep(interval);
@@ -186,9 +209,8 @@ register('binance', {
         const connect = async () => {
           if (!running) return;
           let started;
-          try { started = await core.startUserStream({ market, account }); }
-          catch (e) {
-            process.stderr.write(`[user-stream] start failed: ${e.message} — retry in ${backoff}ms\n`);
+          try { started = await core.startUserStream({ market, account }); } catch (err) {
+              process.stderr.write(`[user-stream] start failed: ${err.message} — retry in ${backoff}ms\n`);
             return void setTimeout(connect, (backoff = Math.min(backoff * 2, 30000)));
           }
           listenKey = started.listenKey;
@@ -208,7 +230,7 @@ register('binance', {
           ws.addEventListener('error', () => { /* a 'close' event follows; reconnect there */ });
           if (keepAlive) clearInterval(keepAlive);
           keepAlive = setInterval(() => {
-            core.keepAliveUserStream({ market, account, listenKey }).catch((e) => process.stderr.write(`[user-stream] keepalive failed: ${e.message}\n`));
+              core.keepAliveUserStream({market, account, listenKey}).catch((err) => process.stderr.write(`[user-stream] keepalive failed: ${err.message}\n`));
           }, 30 * 60 * 1000);
         };
 
@@ -227,8 +249,11 @@ register('binance', {
       handler: async (o) => {
         const market = o.market || 'futures';
         let plan;
-        try { plan = core.buildMarketStream({ market, symbols: o.symbols, streams: o.streams || 'trade,bookTicker' }); }
-        catch (e) { process.stderr.write(`[market-stream] ${e.message}\n`); process.exit(1); return; }
+        try { plan = core.buildMarketStream({ market, symbols: o.symbols, streams: o.streams || 'trade,bookTicker' }); } catch (err) {
+            process.stderr.write(`[market-stream] ${err.message}\n`);
+            process.exit(1);
+            return;
+        }
 
         process.stderr.write('⚠  tradingview-mcp | Unofficial. Public market data only — no account/keys involved.\n');
         process.stderr.write(`[market-stream:${market}] ${plan.subscriptions.join(', ')} — Ctrl-C to stop\n`);
@@ -296,20 +321,20 @@ register('binance', {
       },
       handler: (o) => core.getAggTrades({
         market: o.market || 'futures', symbol: o.symbol, fromId: o.fromId,
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          limit: num(o.limit),
       }),
     }],
     ['historical', {
       description: 'Get historical trades (spot only) — requires API key',
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDT', required: true }, fromId: { type: 'string' }, limit: { type: 'string', short: 'n' }, account: accountOpt },
-      handler: (o) => core.getHistoricalTrades({ market: o.market || 'spot', symbol: o.symbol, fromId: o.fromId, limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account }),
+        handler: (o) => core.getHistoricalTrades({market: o.market || 'spot', symbol: o.symbol, fromId: o.fromId, limit: num(o.limit), account: o.account}),
     }],
     ['account-trades', {
       description: "Get user's account trades (signed)",
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDT', required: true }, fromId: { type: 'string' }, limit: { type: 'string', short: 'n' }, account: accountOpt },
-      handler: (o) => core.getAccountTrades({ market: o.market || 'futures', symbol: o.symbol, fromId: o.fromId, limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account }),
+        handler: (o) => core.getAccountTrades({market: o.market || 'futures', symbol: o.symbol, fromId: o.fromId, limit: num(o.limit), account: o.account}),
     }],
     ['order-history', {
       description: 'All orders for a symbol — open, filled, and cancelled (signed)',
@@ -324,9 +349,9 @@ register('binance', {
       },
       handler: (o) => core.getOrderHistory({
         market: o.market || 'futures', symbol: o.symbol, orderId: o.orderId,
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          limit: num(o.limit), account: o.account,
       }),
     }],
     ['income', {
@@ -342,9 +367,9 @@ register('binance', {
       },
       handler: (o) => core.getIncome({
         market: o.market || 'futures', symbol: o.symbol, incomeType: o.incomeType,
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          limit: num(o.limit), account: o.account,
       }),
     }],
     ['liquidation-history', {
@@ -360,15 +385,15 @@ register('binance', {
       },
       handler: (o) => core.getLiquidationHistory({
         market: o.market || 'futures', symbol: o.symbol, autoCloseType: o.autoCloseType,
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          limit: num(o.limit), account: o.account,
       }),
     }],
     ['trades', {
       description: 'Get recent public trades for a symbol',
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDT', required: true }, limit: { type: 'string', short: 'n', description: 'Max number of trades (1-1000, default 50)' } },
-      handler: (o) => core.getRecentTrades({ market: o.market || 'futures', symbol: o.symbol, limit: o.limit !== undefined ? Number(o.limit) : undefined }),
+        handler: (o) => core.getRecentTrades({market: o.market || 'futures', symbol: o.symbol, limit: num(o.limit)}),
     }],
     ['order', {
       description: 'Place an order (DRY RUN unless --confirm is passed)',
@@ -396,9 +421,9 @@ register('binance', {
         symbol: o.symbol,
         side: o.side,
         type: o.type || 'MARKET',
-          quantity: o.quantity !== undefined ? Number(o.quantity) : undefined,
-          price: o.price !== undefined ? Number(o.price) : undefined,
-          stopPrice: o.stopPrice !== undefined ? Number(o.stopPrice) : undefined,
+          quantity: num(o.quantity),
+          price: num(o.price),
+          stopPrice: num(o.stopPrice),
           closePosition: !!o.closePosition,
           postOnly: !o.noPostOnly,
           allowTaker: !!o.allowTaker,
@@ -446,13 +471,12 @@ register('binance', {
       },
       handler: (o) => core.placeLadder({
         market: o.market || 'futures', symbol: o.symbol, side: o.side,
-        lo: Number(o.lo), hi: Number(o.hi), count: o.count !== undefined ? Number(o.count) : undefined,
-        totalNotional: o.totalNotional !== undefined ? Number(o.totalNotional) : undefined,
-        totalQuantity: o.totalQuantity !== undefined ? Number(o.totalQuantity) : undefined,
+          lo: Number(o.lo), hi: Number(o.hi), count: num(o.count),
+          totalNotional: num(o.totalNotional),
+          totalQuantity: num(o.totalQuantity),
         positionSide: o.positionSide,
-        seedQuantity: o.seed === undefined ? undefined
-          : (String(o.seed).trim().toLowerCase() === 'min' ? 'min' : Number(o.seed)),
-        stop: o.stop !== undefined ? Number(o.stop) : undefined,
+          seedQuantity: parseSeedQuantity(o.seed),
+          stop: num(o.stop),
         postOnly: !o.noPostOnly, round: !o.noRound, account: o.account, confirm: !!o.confirm,
       }),
     }],
@@ -489,8 +513,8 @@ register('binance', {
         if (!o.orderId && !o.origClientOrderId) throw new Error('Either --orderId or --origClientOrderId is required');
         return core.modifyOrder({
           market: o.market || 'futures', symbol: o.symbol, orderId: o.orderId, origClientOrderId: o.origClientOrderId,
-          side: o.side, quantity: o.quantity !== undefined ? Number(o.quantity) : undefined,
-          price: o.price !== undefined ? Number(o.price) : undefined,
+            side: o.side, quantity: num(o.quantity),
+            price: num(o.price),
           round: !o.noRound, account: o.account, confirm: !!o.confirm,
         });
       },
@@ -524,7 +548,7 @@ register('binance', {
       },
       handler: (o) => core.watchPrice({
         market: o.market || 'futures', symbol: o.symbol,
-        durationSec: o.durationSec !== undefined ? Number(o.durationSec) : undefined,
+          durationSec: num(o.durationSec),
       }),
     }],
     ['watch-flow', {
@@ -537,8 +561,8 @@ register('binance', {
       },
       handler: (o) => core.watchOrderFlow({
         market: o.market || 'futures', symbol: o.symbol,
-        durationSec: o.durationSec !== undefined ? Number(o.durationSec) : undefined,
-        levels: o.levels !== undefined ? Number(o.levels) : undefined,
+          durationSec: num(o.durationSec),
+          levels: num(o.levels),
       }),
     }],
     ['footprint', {
@@ -552,7 +576,7 @@ register('binance', {
       handler: (o) => core.getFootprintBars({
         market: o.market || 'futures', symbol: o.symbol,
         interval: o.interval || '1m',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          limit: num(o.limit),
       }),
     }],
     ['vol-regime', {
@@ -566,7 +590,7 @@ register('binance', {
       handler: (o) => core.getVolatilityRegime({
         market: o.market || 'futures', symbol: o.symbol,
         intervals: o.intervals ? String(o.intervals).split(',').map((x) => x.trim()).filter(Boolean) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          limit: num(o.limit),
       }),
     }],
     ['options-surface', {
@@ -595,9 +619,9 @@ register('binance', {
       },
       handler: (o) => core.getKlines({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          limit: num(o.limit),
         extended: !!o.extended,
       }),
     }],
@@ -634,9 +658,9 @@ register('binance', {
       },
       handler: (o) => core.getUiKlines({
         market: o.market || 'spot', symbol: o.symbol, interval: o.interval || '1h',
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          limit: num(o.limit),
         extended: !!o.extended,
       }),
     }],
@@ -658,7 +682,7 @@ register('binance', {
         history: { type: 'boolean', description: 'Recent funding-rate history instead of the current snapshot' },
         limit: { type: 'string', short: 'n', description: 'History rows (default 10, max 1000)' },
       },
-      handler: (o) => core.getFundingRate({ market: o.market || 'futures', symbol: o.symbol, history: !!o.history, limit: o.limit !== undefined ? Number(o.limit) : undefined }),
+        handler: (o) => core.getFundingRate({market: o.market || 'futures', symbol: o.symbol, history: !!o.history, limit: num(o.limit)}),
     }],
     ['avg-price', {
       description: 'Current average price over a short window (spot-only; ~5-min avg)',
@@ -694,7 +718,7 @@ register('binance', {
       },
       handler: (o) => core.getTechnicals({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          limit: num(o.limit),
       }),
     }],
     ['correlate', {
@@ -707,7 +731,7 @@ register('binance', {
       },
       handler: (o) => core.correlateSymbols({
         market: o.market || 'futures', symbols: o.symbols, interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          limit: num(o.limit),
       }),
     }],
     ['backtest', {
@@ -726,9 +750,9 @@ register('binance', {
       },
       handler: (o) => core.backtestStrategy({
         market: o.market || 'futures', symbol: o.symbol, strategy: o.strategy || 'ema_cross', interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
-        commission: o.commission !== undefined ? Number(o.commission) : undefined,
-        slippage: o.slippage !== undefined ? Number(o.slippage) : undefined,
+          limit: num(o.limit),
+          commission: num(o.commission),
+          slippage: num(o.slippage),
         allowShort: !o.noShort, includeTrades: !!o.trades, includeEquityCurve: !!o.equity,
       }),
     }],
@@ -746,9 +770,9 @@ register('binance', {
       },
       handler: (o) => core.compareStrategies({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
-        commission: o.commission !== undefined ? Number(o.commission) : undefined,
-        slippage: o.slippage !== undefined ? Number(o.slippage) : undefined,
+          limit: num(o.limit),
+          commission: num(o.commission),
+          slippage: num(o.slippage),
         allowShort: !o.noShort, sortBy: o.sortBy || 'totalReturnPct',
       }),
     }],
@@ -767,10 +791,10 @@ register('binance', {
       },
       handler: (o) => core.walkForwardBacktest({
         market: o.market || 'futures', symbol: o.symbol, strategy: o.strategy || 'ema_cross', interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
-        trainRatio: o.trainRatio !== undefined ? Number(o.trainRatio) : undefined,
-        commission: o.commission !== undefined ? Number(o.commission) : undefined,
-        slippage: o.slippage !== undefined ? Number(o.slippage) : undefined,
+          limit: num(o.limit),
+          trainRatio: num(o.trainRatio),
+          commission: num(o.commission),
+          slippage: num(o.slippage),
         allowShort: !o.noShort,
       }),
     }],
@@ -809,8 +833,8 @@ register('binance', {
       },
       handler: (o) => core.detectCandlestickPatterns({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
-        lookback: o.lookback !== undefined ? Number(o.lookback) : undefined,
+          limit: num(o.limit),
+          lookback: num(o.lookback),
       }),
     }],
     ['signal', {
@@ -824,7 +848,7 @@ register('binance', {
       },
       handler: (o) => core.getSignal({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
-        limit: o.limit !== undefined ? Number(o.limit) : undefined,
+          limit: num(o.limit),
         mtf: !!o.mtf,
       }),
     }],
@@ -835,7 +859,7 @@ register('binance', {
         symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDT', required: true },
         limit: { type: 'string', short: 'n', description: 'Levels per side (default 20)' },
       },
-      handler: (o) => core.getOrderBook({ market: o.market || 'futures', symbol: o.symbol, limit: o.limit !== undefined ? Number(o.limit) : undefined }),
+        handler: (o) => core.getOrderBook({market: o.market || 'futures', symbol: o.symbol, limit: num(o.limit)}),
     }],
     ['symbol-info', {
       description: 'Trading filters: tick size, step size, min notional, precision',
@@ -850,7 +874,7 @@ register('binance', {
         leverage: { type: 'string', short: 'l', description: 'Integer 1-125', required: true },
         account: accountOpt,
       },
-      handler: (o) => core.setLeverage({ market: o.market || 'futures', symbol: o.symbol, leverage: o.leverage !== undefined ? Number(o.leverage) : undefined, account: o.account }),
+        handler: (o) => core.setLeverage({market: o.market || 'futures', symbol: o.symbol, leverage: num(o.leverage), account: o.account}),
     }],
     ['margin-type', {
       description: 'Set margin type ISOLATED|CROSSED for a futures symbol',
@@ -899,24 +923,20 @@ register('binance', {
         confirm: { type: 'boolean', description: 'REQUIRED to actually place the bracket' },
       },
       handler: (o) => {
-        const raw = Array.isArray(o.tp) ? o.tp : (o.tp ? [o.tp] : []);
-        const takeProfits = raw.map((s) => {
-          const [p, q] = String(s).split(':');
-          return { price: Number(p), quantity: q !== undefined ? Number(q) : undefined };
-        });
+          const takeProfits = parseTakeProfits(o.tp);
         return core.placeBracket({
           market: o.market || 'futures',
           symbol: o.symbol,
           side: o.side,
-          quantity: o.quantity !== undefined ? Number(o.quantity) : undefined,
+            quantity: num(o.quantity),
           includeEntry: !o.noEntry,
           entryType: o.entryType || 'MARKET',
-          entryPrice: o.entryPrice !== undefined ? Number(o.entryPrice) : undefined,
+            entryPrice: num(o.entryPrice),
           postOnly: !o.noPostOnly,
           allowTaker: !!o.allowTaker,
-          hedge: o.hedge ? true : (o.oneWay ? false : undefined),
+            hedge: hedgeFlag(o.hedge, o.oneWay),
           round: !o.noRound,
-          stopPrice: o.stop !== undefined ? Number(o.stop) : undefined,
+            stopPrice: num(o.stop),
           takeProfits,
           account: o.account,
           confirm: !!o.confirm,
@@ -947,9 +967,9 @@ register('binance', {
         symbol: o.symbol,
         side: o.side,
         type: o.type || 'MARKET',
-        quantity: o.quantity !== undefined ? Number(o.quantity) : undefined,
-        price: o.price !== undefined ? Number(o.price) : undefined,
-        stopPrice: o.stopPrice !== undefined ? Number(o.stopPrice) : undefined,
+          quantity: num(o.quantity),
+          price: num(o.price),
+          stopPrice: num(o.stopPrice),
         postOnly: !o.noPostOnly,
         allowTaker: !!o.allowTaker,
         timeInForce: o.timeInForce,
@@ -982,24 +1002,20 @@ register('binance', {
         confirm: { type: 'boolean', description: 'REQUIRED to actually place the brackets on all accounts' },
       },
       handler: (o) => {
-        const raw = Array.isArray(o.tp) ? o.tp : (o.tp ? [o.tp] : []);
-        const takeProfits = raw.map((s) => {
-          const [p, q] = String(s).split(':');
-          return { price: Number(p), quantity: q !== undefined ? Number(q) : undefined };
-        });
+          const takeProfits = parseTakeProfits(o.tp);
         return core.mirrorBracket({
           market: o.market || 'futures',
           symbol: o.symbol,
           side: o.side,
-          quantity: o.quantity !== undefined ? Number(o.quantity) : undefined,
+            quantity: num(o.quantity),
           includeEntry: !o.noEntry,
           entryType: o.entryType || 'MARKET',
-          entryPrice: o.entryPrice !== undefined ? Number(o.entryPrice) : undefined,
+            entryPrice: num(o.entryPrice),
           postOnly: !o.noPostOnly,
           allowTaker: !!o.allowTaker,
-          hedge: o.hedge ? true : (o.oneWay ? false : undefined),
+            hedge: hedgeFlag(o.hedge, o.oneWay),
           round: !o.noRound,
-          stopPrice: o.stop !== undefined ? Number(o.stop) : undefined,
+            stopPrice: num(o.stop),
           takeProfits,
           accounts: o.accounts ? String(o.accounts).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
           marginAsset: o.marginAsset,
@@ -1052,7 +1068,7 @@ register('binance', {
       },
       handler: (o) => core.transfer({
         asset: o.asset,
-        amount: o.amount !== undefined ? Number(o.amount) : undefined,
+          amount: num(o.amount),
         from: o.from || 'futures',
         to: o.to || 'spot',
         account: o.account,
@@ -1067,7 +1083,7 @@ register('binance', {
         size: { type: 'string', short: 'n', description: 'Rows to return (1-100, default 10)' },
         account: accountOpt,
       },
-      handler: (o) => core.getTransferHistory({ from: o.from || 'futures', to: o.to || 'spot', size: o.size !== undefined ? Number(o.size) : undefined, account: o.account }),
+        handler: (o) => core.getTransferHistory({from: o.from || 'futures', to: o.to || 'spot', size: num(o.size), account: o.account}),
     }],
     ['deposit-history', {
       description: 'On-chain deposit history (signed, read-only)',
@@ -1081,11 +1097,11 @@ register('binance', {
         account: accountOpt,
       },
       handler: (o) => core.getDepositHistory({
-        coin: o.coin, status: o.status !== undefined ? Number(o.status) : undefined,
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        offset: o.offset !== undefined ? Number(o.offset) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+          coin: o.coin, status: num(o.status),
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          offset: num(o.offset),
+          limit: num(o.limit), account: o.account,
       }),
     }],
     ['withdraw-history', {
@@ -1100,11 +1116,11 @@ register('binance', {
         account: accountOpt,
       },
       handler: (o) => core.getWithdrawHistory({
-        coin: o.coin, status: o.status !== undefined ? Number(o.status) : undefined,
-        startTime: o.startTime !== undefined ? Number(o.startTime) : undefined,
-        endTime: o.endTime !== undefined ? Number(o.endTime) : undefined,
-        offset: o.offset !== undefined ? Number(o.offset) : undefined,
-        limit: o.limit !== undefined ? Number(o.limit) : undefined, account: o.account,
+          coin: o.coin, status: num(o.status),
+          startTime: num(o.startTime),
+          endTime: num(o.endTime),
+          offset: num(o.offset),
+          limit: num(o.limit), account: o.account,
       }),
     }],
     ['deposit-address', {

@@ -4,10 +4,10 @@
  * Scans symbols from rules.json, collects chart + indicator snapshots,
  * and supports saving/retrieving daily session briefs.
  */
-import { existsSync as _existsSync, mkdirSync as _mkdirSync, readFileSync as _readFileSync, writeFileSync as _writeFileSync } from 'node:fs';
-import { homedir as _homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import {existsSync as _existsSync, mkdirSync as _mkdirSync, readFileSync as _readFileSync, writeFileSync as _writeFileSync} from 'node:fs';
+import {homedir as _homedir} from 'node:os';
+import {dirname, isAbsolute, join, relative, resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import * as chart from './chart.js';
 import * as data from './data.js';
 
@@ -115,7 +115,7 @@ export async function runBrief({ rules_path, _deps } = {}) {
 
   try {
     originalState = await deps.chartApi.getState({ _deps: deps.tvDeps });
-  } catch (_) {
+  } catch {
     // Best effort only; morning brief still runs if state fetch fails.
   }
 
@@ -145,7 +145,7 @@ export async function runBrief({ rules_path, _deps } = {}) {
         if (originalState.resolution) {
           await deps.chartApi.setTimeframe({ timeframe: String(originalState.resolution), _deps: deps.tvDeps });
         }
-      } catch (_) {
+      } catch {
         // Ignore restore failures to avoid masking useful scan output.
       }
     }
