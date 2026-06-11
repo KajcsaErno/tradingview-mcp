@@ -81,6 +81,38 @@ register('binance', {
         round: !o.noRound, account: o.account,
       }),
     }],
+      ['grid-plan', {
+          description: 'Plan (never place) a grid: N levels across [--lower, --upper], BUY/SELL split around current price, grid economics (profit per cycle net of fees) and a 3x check. Execute via ladder/order.',
+          options: {
+              market: marketOpt,
+              symbol: {type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true},
+              lower: {type: 'string', description: 'Bottom of the grid range', required: true},
+              upper: {type: 'string', description: 'Top of the grid range', required: true},
+              count: {
+                  type: 'string',
+                  short: 'n',
+                  description: 'Grid LEVELS (N levels = N−1 steps; default 10). BTCUSDC spacing rule: 100/50/25 USD by range width.'
+              },
+              totalNotional: {type: 'string', description: 'Total $ across all levels', oneOfGroup: 'grid_size', mutuallyExclusiveGroup: 'grid_size'},
+              totalQuantity: {type: 'string', description: 'Total base qty across all levels', oneOfGroup: 'grid_size', mutuallyExclusiveGroup: 'grid_size'},
+              mode: {type: 'string', description: 'long (default) | short | neutral (Hedge-Mode two-sided, futures only)'},
+              feePct: {type: 'string', description: 'Maker fee % per side (default 0 — post-only)'},
+              leverage: {type: 'string', short: 'l', description: 'Leverage for the margin estimate (default 3)'},
+              noRound: {type: 'boolean', description: 'Do not snap prices/qty to tick/step'},
+              account: accountOpt,
+          },
+          handler: (o) => core.planGrid({
+              market: o.market || 'futures', symbol: o.symbol,
+              lower: Number(o.lower), upper: Number(o.upper),
+              count: num(o.count),
+              totalNotional: num(o.totalNotional),
+              totalQuantity: num(o.totalQuantity),
+              mode: o.mode,
+              feePct: num(o.feePct),
+              leverage: num(o.leverage),
+              round: !o.noRound, account: o.account,
+          }),
+      }],
     ['expectancy', {
       description: 'Expectancy from a win rate + reward:risk: expectancy in R, break-even win rate (1/(1+rr)), and $/% projections over N trades',
       options: {

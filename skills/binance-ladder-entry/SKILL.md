@@ -9,6 +9,12 @@ You are building a **scaled (laddered) entry** on Binance futures. The goal is t
 
 > ⚠️ These tools move **real funds**. Everything is DRY-RUN until `confirm:true` / `--confirm`. NEVER confirm on the user's behalf — always show the plan and get explicit approval first. Respect the user's standing rules: **3x leverage max**, **USDC pairs only (BTCUSDC default)**.
 
+## Step 0: Consult the playbook
+
+Read `strategies/playbook.md` (if present). Apply *Standing rules* and *Confirmed rules*
+to the ladder you're about to plan; surface any matching *Observation* (same symbol or
+pattern) for the user to weigh. Observations inform, they don't block.
+
 ## Step 1: Establish the setup
 
 Clarify or infer from the user / chart:

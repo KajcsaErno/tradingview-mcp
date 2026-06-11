@@ -22,6 +22,7 @@ import {
     placeBracket,
     placeLadder,
     placeOrder,
+    planGrid,
     roundToFilters,
     transfer,
 } from '../src/core/binance.js';
@@ -650,6 +651,60 @@ describe('placeLadder', () => {
             _deps
         });
         assert.equal(r.ladder_preview.seed.quantity, 10); // 50 / 5 = 10, snapped up to 0.1 step
+    });
+});
+
+describe('planGrid', () => {
+    it('is a pure planner — sends no orders, classifies levels around current price', async () => {
+        const _deps = deps({bookTicker: {symbol: 'BTCUSDC', bidPrice: '60500', askPrice: '60501'}});
+        const r = await planGrid({market: 'futures', symbol: 'BTCUSDC', lower: 60000, upper: 61000, count: 11, totalNotional: 11000, _deps});
+        assert.equal(r.success, true);
+        assert.equal(r.planner_only, true);
+        assert.equal(r.levels, 11); // step 100, all clear minQty
+        assert.equal(r.buyLevels, 5);  // 60000..60400 below mid 60500.5
+        assert.equal(r.sellLevels, 5); // 60600..61000 above
+        assert.ok(r.grid.some((l) => l.side === 'SKIP')); // 60500 sits within half a step of mid
+        assert.equal(posts(_deps.fetch).length, 0);
+    });
+    it('requires exactly one of totalNotional / totalQuantity', async () => {
+        await assert.rejects(planGrid({symbol: 'BTCUSDC', lower: 60000, upper: 61000, _deps: deps()}), /exactly one/);
+        await assert.rejects(planGrid({symbol: 'BTCUSDC', lower: 60000, upper: 61000, totalNotional: 1000, totalQuantity: 1, _deps: deps()}), /exactly one/);
+    });
+    it('rejects count < 2 and inverted ranges', async () => {
+        await assert.rejects(planGrid({symbol: 'BTCUSDC', lower: 60000, upper: 61000, count: 1, totalNotional: 1000, _deps: deps()}), /count must be >= 2/);
+        await assert.rejects(planGrid({symbol: 'BTCUSDC', lower: 61000, upper: 60000, totalNotional: 1000, _deps: deps()}), /lower must be < upper/);
+    });
+    it('mode "neutral" is futures-only', async () => {
+        await assert.rejects(planGrid({
+            market: 'spot',
+            symbol: 'BTCUSDC',
+            lower: 60000,
+            upper: 61000,
+            totalNotional: 1000,
+            mode: 'neutral',
+            _deps: deps()
+        }), /futures-only/);
+    });
+    it('warns when spacing does not cover the round-trip fee', async () => {
+        // step 100 at ~60.5k ⇒ spacing ≈ 0.165%; 2 × 0.1% fee = 0.2% ⇒ losing grid
+        const _deps = deps({bookTicker: {symbol: 'BTCUSDC', bidPrice: '60500', askPrice: '60501'}});
+        const r = await planGrid({symbol: 'BTCUSDC', lower: 60000, upper: 61000, count: 11, totalNotional: 11000, feePct: 0.1, _deps});
+        assert.ok(r.economics.profitPerGridPct < 0);
+        assert.ok((r.warnings || []).some((w) => /LOSE money/.test(w)));
+    });
+    it('warns when current price is outside the grid range', async () => {
+        const _deps = deps({bookTicker: {symbol: 'BTCUSDC', bidPrice: '59000', askPrice: '59001'}});
+        const r = await planGrid({symbol: 'BTCUSDC', lower: 60000, upper: 61000, count: 5, totalNotional: 5000, _deps});
+        assert.ok((r.warnings || []).some((w) => /OUTSIDE/.test(w)));
+    });
+    it('warns (3x rule) when total notional exceeds account equity × 3', async () => {
+        const _deps = deps({
+            'fapi/v2/account': {totalMarginBalance: '10000', totalMaintMargin: '0'},
+            bookTicker: {symbol: 'BTCUSDC', bidPrice: '60500', askPrice: '60501'},
+        });
+        const r = await planGrid({symbol: 'BTCUSDC', lower: 60000, upper: 61000, count: 11, totalNotional: 60500, _deps});
+        assert.ok(r.impliedAccountLeverage > 3);
+        assert.ok((r.warnings || []).some((w) => /3x rule/.test(w)));
     });
 });
 
