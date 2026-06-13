@@ -33,3 +33,4 @@ Thumbs.db
 # Trend-rider bot runtime artifacts
 strategies/trend-rider-state.json
 strategies/trend-rider-log.jsonl
+strategies/equity-log.jsonl

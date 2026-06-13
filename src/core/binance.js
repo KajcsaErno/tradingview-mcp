@@ -41,6 +41,7 @@ export {
     getTicker, getOrderBook, getKlines, getUiKlines,
     get24hrTicker, getBookTicker, getTradingDayTicker, getAvgPrice, getRollingWindowTicker,
     compareSymbols, getFundingRate,
+    getOpenInterest, getOpenInterestHist, getLongShortRatio, getTakerBuySellRatio,
     getRecentTrades, getAggTrades, getHistoricalTrades,
     startUserStream, keepAliveUserStream, closeUserStream,
     watchPrice, watchOrderFlow, getFootprintBars, getOptionsSurface,
@@ -51,6 +52,11 @@ export {
 export {
     calcExpectancy, estimateLosingStreak, simulateEquity,
     getTechnicals, correlateSymbols, getVolatilityRegime,
-    STRATEGY_KEYS, backtestStrategy, compareStrategies, walkForwardBacktest,
+    STRATEGY_KEYS, backtestStrategy, compareStrategies, walkForwardBacktest, optimizeStrategy,
     getMultiTimeframe, SCAN_SIGNAL_KEYS, scanSignals, detectCandlestickPatterns, getSignal,
+    getPositioning,
 } from './binance/analysis.js';
+
+export {getFearGreed, getMarketEvents} from './binance/sentiment.js';
+
+export {buildEquityLogEntry, appendEquityLog, analyzeEquityLog} from './binance/equity.js';

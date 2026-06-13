@@ -271,11 +271,11 @@ register('binance', {
       },
     }],
     ['market-stream', {
-      description: 'Stream public market data (trade/ticker/bookTicker/kline/markPrice/funding) for one or more symbols over a multiplexed WebSocket; emits JSONL. Ctrl-C to stop.',
+      description: 'Stream public market data (trade/ticker/bookTicker/kline/markPrice/funding/forceOrder liquidations) for one or more symbols over a multiplexed WebSocket; emits JSONL. Ctrl-C to stop.',
       options: {
         market: marketOpt,
         symbols: { type: 'string', short: 's', description: 'CSV of symbols, e.g. "BTCUSDC,ETHUSDC"', required: true },
-        streams: { type: 'string', description: 'CSV of stream types: trade,aggTrade,ticker,bookTicker,kline[:1m],markPrice,funding (default trade,bookTicker)' },
+        streams: { type: 'string', description: 'CSV of stream types: trade,aggTrade,ticker,bookTicker,kline[:1m],markPrice,funding,forceOrder (per-symbol liquidations),allForceOrder (market-wide, futures) — default trade,bookTicker' },
         raw: { type: 'boolean', description: 'Emit the raw Binance payload instead of the compact summary' },
       },
       handler: async (o) => {
@@ -716,6 +716,50 @@ register('binance', {
       },
         handler: (o) => core.getFundingRate({market: o.market || 'futures', symbol: o.symbol, history: !!o.history, limit: num(o.limit)}),
     }],
+    ['open-interest', {
+      description: 'Open interest (public, futures): current snapshot, or --history for the per-period series + % change. Rising OI = new money; falling OI = positions closing. USD-M only for --history.',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        history: { type: 'boolean', description: 'Per-period history (USD-M only, ~30 days) instead of the current snapshot' },
+        period: { type: 'string', description: 'Statistics bucket: 5m|15m|30m|1h|2h|4h|6h|12h|1d (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'History rows (default 30, max 500)' },
+      },
+        handler: (o) => (o.history
+            ? core.getOpenInterestHist({market: o.market || 'futures', symbol: o.symbol, period: o.period || '1h', limit: num(o.limit)})
+            : core.getOpenInterest({market: o.market || 'futures', symbol: o.symbol})),
+    }],
+    ['long-short-ratio', {
+      description: 'Long/short ratio series (public, USD-M only). --kind global (all accounts) | topAccount | topPosition (top traders by size). Ratio > 1 = more longs.',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        kind: { type: 'string', description: 'global (default) | topAccount | topPosition' },
+        period: { type: 'string', description: 'Statistics bucket: 5m|15m|30m|1h|2h|4h|6h|12h|1d (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'History rows (default 30, max 500)' },
+      },
+        handler: (o) => core.getLongShortRatio({market: o.market || 'futures', symbol: o.symbol, kind: o.kind || 'global', period: o.period || '1h', limit: num(o.limit)}),
+    }],
+    ['taker-ratio', {
+      description: 'Taker buy/sell volume ratio series (public, USD-M only). Ratio > 1 = aggressive buyers dominating the tape.',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        period: { type: 'string', description: 'Statistics bucket: 5m|15m|30m|1h|2h|4h|6h|12h|1d (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'History rows (default 30, max 500)' },
+      },
+        handler: (o) => core.getTakerBuySellRatio({market: o.market || 'futures', symbol: o.symbol, period: o.period || '1h', limit: num(o.limit)}),
+    }],
+    ['positioning', {
+      description: 'Composite positioning read (public, USD-M): OI change vs price change (new longs / short covering / new shorts / long unwind), long/short ratios + taker flow. USDC symbols auto-fall back to the USDT twin.',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        period: { type: 'string', description: 'Statistics bucket: 5m|15m|30m|1h|2h|4h|6h|12h|1d (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'Window length in period buckets (default 30)' },
+      },
+        handler: (o) => core.getPositioning({market: o.market || 'futures', symbol: o.symbol, period: o.period || '1h', limit: num(o.limit)}),
+    }],
     ['avg-price', {
       description: 'Current average price over a short window (spot-only; ~5-min avg)',
       options: { market: marketOpt, symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true } },
@@ -830,6 +874,32 @@ register('binance', {
         allowShort: !o.noShort,
       }),
     }],
+    ['optimize', {
+      description: 'Grid-sweep a strategy\'s parameters: rank combos on the train window, judge the winner out-of-sample. Reports selectionEdgePct (negative = keep the defaults) + an overfitting verdict. Read-only.',
+      options: {
+        market: marketOpt,
+        symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
+        strategy: { type: 'string', description: 'Strategy key (default ema_cross)' },
+        interval: { type: 'string', short: 'i', description: '1m,5m,15m,1h,4h,1d,… (default 1h)' },
+        limit: { type: 'string', short: 'n', description: 'Bars (min 240; default 1000)' },
+        trainRatio: { type: 'string', description: 'In-sample fraction 0.1–0.95 (default 0.7)' },
+        sortBy: { type: 'string', description: 'Train-window ranking metric: sharpe (default) | calmar | totalReturnPct | annualizedReturnPct | winRatePct | profitFactor | maxDrawdownPct | expectancyPct' },
+        commission: { type: 'string', description: 'Per-side commission fraction (default 0.0004)' },
+        slippage: { type: 'string', description: 'Per-side slippage fraction (default 0.0005)' },
+        noShort: { type: 'boolean', description: 'Long-only (disallow shorts)' },
+        top: { type: 'string', description: 'Leaderboard rows (default 10)' },
+      },
+      handler: (o) => core.optimizeStrategy({
+        market: o.market || 'futures', symbol: o.symbol, strategy: o.strategy || 'ema_cross', interval: o.interval || '1h',
+          limit: num(o.limit),
+          trainRatio: num(o.trainRatio),
+          sortBy: o.sortBy || 'sharpe',
+          commission: num(o.commission),
+          slippage: num(o.slippage),
+        allowShort: !o.noShort,
+          top: num(o.top),
+      }),
+    }],
     ['multi-timeframe', {
       description: 'Trend/momentum confluence across timeframes (--intervals CSV, default 15m,1h,4h,1d): per-TF trend + a bullish/bearish bias and aligned flag',
       options: {
@@ -870,19 +940,50 @@ register('binance', {
       }),
     }],
     ['signal', {
-      description: 'Composite BUY/SELL/HOLD score off the technicals (SMA200/EMA50/MACD/RSI/VWAP/Bollinger) with confidence + reasons; --mtf folds in multi-timeframe confluence',
+      description: 'Composite BUY/SELL/HOLD score off the technicals (SMA200/EMA50/MACD/RSI/VWAP/Bollinger) with confidence + reasons; --mtf folds in multi-timeframe confluence, --positioning the open-interest read',
       options: {
         market: marketOpt,
         symbol: { type: 'string', short: 's', description: 'e.g. BTCUSDC', required: true },
         interval: { type: 'string', short: 'i', description: '1m,5m,15m,1h,4h,1d,… (default 1h)' },
         limit: { type: 'string', short: 'n', description: 'Bars to analyze (min 30; default 300)' },
         mtf: { type: 'boolean', description: 'Fold in 15m/1h/4h/1d trend confluence as an extra factor' },
+        positioning: { type: 'boolean', description: 'Fold in the open-interest positioning read (OI vs price quadrant) as an extra factor' },
+        events: { type: 'boolean', description: 'Flag imminent FOMC/CPI releases (within 2 days) as cautions' },
       },
       handler: (o) => core.getSignal({
         market: o.market || 'futures', symbol: o.symbol, interval: o.interval || '1h',
           limit: num(o.limit),
         mtf: !!o.mtf,
+        positioning: !!o.positioning,
+        events: !!o.events,
       }),
+    }],
+    ['equity-log', {
+      description: 'Append one equity sample (margin balance incl. uPnL, per account) to strategies/equity-log.jsonl — run on a schedule to record the actual equity curve. --report analyzes the recorded log (return, max/current drawdown, streaks) and compares against --expectedMaxDD.',
+      options: {
+        market: marketOpt,
+        accounts: { type: 'string', description: 'CSV of account ids to sample (default "1")' },
+        file: { type: 'string', description: 'Log path (default strategies/equity-log.jsonl)' },
+        report: { type: 'boolean', description: 'Analyze the recorded log instead of appending a sample' },
+        expectedMaxDD: { type: 'string', description: 'Expected max drawdown % to compare against (with --report; e.g. the simulate-equity p90)' },
+      },
+        handler: (o) => (o.report
+            ? core.analyzeEquityLog({file: o.file, expectedMaxDrawdownPct: num(o.expectedMaxDD)})
+            : core.appendEquityLog({market: o.market || 'futures', accounts: o.accounts || '1', file: o.file})),
+    }],
+    ['fear-greed', {
+      description: 'Crypto Fear & Greed index (alternative.me, keyless; market-wide). 0 = extreme fear, 100 = extreme greed — contrarian at the extremes. --limit for daily history.',
+      options: {
+        limit: { type: 'string', short: 'n', description: 'Days of history (default 1, max 90)' },
+      },
+        handler: (o) => core.getFearGreed({limit: num(o.limit)}),
+    }],
+    ['events', {
+      description: 'Upcoming scheduled US macro events (FOMC rate decisions, CPI releases) from a static verified 2026 calendar — check before positioning into a volatility squeeze',
+      options: {
+        daysAhead: { type: 'string', short: 'd', description: 'Look-ahead window in days (default 14, max 365)' },
+      },
+        handler: (o) => core.getMarketEvents({daysAhead: num(o.daysAhead)}),
     }],
     ['depth', {
       description: 'Order book depth (public)',

@@ -18,12 +18,18 @@ import {
     getBookTicker,
     getFundingRate,
     getKlines,
+    getLongShortRatio,
     getMultiTimeframe,
+    getOpenInterest,
+    getOpenInterestHist,
+    getPositioning,
     getRollingWindowTicker,
     getSignal,
+    getTakerBuySellRatio,
     getTechnicals,
     getTradingDayTicker,
     getUiKlines,
+    optimizeStrategy,
     SCAN_SIGNAL_KEYS,
     scanSignals,
     STRATEGY_KEYS,
@@ -626,5 +632,153 @@ describe('getSignal — composite decision score', () => {
 
     it('requires a symbol', async () => {
         await assert.rejects(getSignal({market: 'futures', _deps: deps()}), /symbol is required/);
+    });
+});
+
+// ── open interest & positioning statistics (public, USD-M) ───────────────────
+describe('open interest & positioning', () => {
+    const OI_ROWS = [
+        {sumOpenInterest: '80000', sumOpenInterestValue: '5000000000', timestamp: 1},
+        {sumOpenInterest: '90000', sumOpenInterestValue: '5600000000', timestamp: 2},
+        {sumOpenInterest: '100000', sumOpenInterestValue: '6300000000', timestamp: 3},
+    ];
+
+    it('getOpenInterest hits the futures snapshot endpoint and parses the number', async () => {
+        const _deps = deps({'v1/openInterest': {openInterest: '12345.678', symbol: 'BTCUSDC', time: 99}});
+        const r = await getOpenInterest({market: 'futures', symbol: 'btcusdc', _deps});
+        assert.equal(r.openInterest, 12345.678);
+        assert.equal(r.symbol, 'BTCUSDC');
+        assert.match(_deps.fetch.calls[0].url, /\/fapi\/v1\/openInterest\?symbol=BTCUSDC/);
+    });
+
+    it('getOpenInterest rejects spot', async () => {
+        await assert.rejects(getOpenInterest({market: 'spot', symbol: 'BTCUSDC', _deps: deps()}), /futures-only/);
+    });
+
+    it('getOpenInterestHist computes window change % and rejects COIN-M / bad periods', async () => {
+        const _deps = deps({openInterestHist: OI_ROWS});
+        const r = await getOpenInterestHist({market: 'futures', symbol: 'BTCUSDC', period: '1h', _deps});
+        assert.equal(r.count, 3);
+        assert.equal(r.changePct, 25); // 80k -> 100k
+        assert.equal(r.latest.openInterest, 100000);
+        assert.match(_deps.fetch.calls[0].url, /\/futures\/data\/openInterestHist/);
+        await assert.rejects(getOpenInterestHist({market: 'coinm', symbol: 'BTCUSD_PERP', _deps: deps()}), /USD-M futures-only/);
+        await assert.rejects(getOpenInterestHist({market: 'futures', symbol: 'BTCUSDC', period: '7m', _deps: deps()}), /period must be one of/);
+    });
+
+    it('getOpenInterestHist notes the USDT-twin proxy when a symbol is not covered', async () => {
+        const _deps = deps({openInterestHist: []});
+        const r = await getOpenInterestHist({market: 'futures', symbol: 'BTCUSDC', _deps});
+        assert.equal(r.count, 0);
+        assert.match(r.note, /BTCUSDT/);
+    });
+
+    it('getLongShortRatio routes each kind to its endpoint and parses ratios', async () => {
+        const row = [{longShortRatio: '2.5', longAccount: '0.7143', shortAccount: '0.2857', timestamp: 5}];
+        const _g = deps({globalLongShortAccountRatio: row});
+        const g = await getLongShortRatio({market: 'futures', symbol: 'BTCUSDC', kind: 'global', _deps: _g});
+        assert.equal(g.latest.ratio, 2.5);
+        assert.match(_g.fetch.calls[0].url, /globalLongShortAccountRatio/);
+        const _p = deps({topLongShortPositionRatio: row});
+        await getLongShortRatio({market: 'futures', symbol: 'BTCUSDC', kind: 'topPosition', _deps: _p});
+        assert.match(_p.fetch.calls[0].url, /topLongShortPositionRatio/);
+        await assert.rejects(getLongShortRatio({market: 'futures', symbol: 'BTCUSDC', kind: 'nope', _deps: deps()}), /kind must be one of/);
+    });
+
+    it('getTakerBuySellRatio averages the buy/sell ratio over the window', async () => {
+        const _deps = deps({takerlongshortRatio: [
+            {buySellRatio: '1.2', buyVol: '120', sellVol: '100', timestamp: 1},
+            {buySellRatio: '0.8', buyVol: '80', sellVol: '100', timestamp: 2},
+        ]});
+        const r = await getTakerBuySellRatio({market: 'futures', symbol: 'BTCUSDC', _deps});
+        assert.equal(r.latest.buySellRatio, 0.8);
+        assert.equal(r.avgBuySellRatio, 1);
+    });
+
+    it('getPositioning reads new_longs when price and OI rise together, with crowding cautions', async () => {
+        const _deps = deps({
+            openInterestHist: OI_ROWS,
+            globalLongShortAccountRatio: [{longShortRatio: '3.5', longAccount: '0.7778', shortAccount: '0.2222', timestamp: 1}],
+            topLongShortPositionRatio: [{longShortRatio: '1.4', longAccount: '0.5833', shortAccount: '0.4167', timestamp: 1}],
+            takerlongshortRatio: [{buySellRatio: '1.3', buyVol: '130', sellVol: '100', timestamp: 1}],
+            klines: genKlines(30, (i) => 60000 + i * 100),
+        });
+        const r = await getPositioning({market: 'futures', symbol: 'BTCUSDC', _deps});
+        assert.equal(r.read.quadrant, 'new_longs');
+        assert.equal(r.read.score, 1);
+        assert.equal(r.openInterest.direction, 'up');
+        assert.equal(r.price.direction, 'up');
+        assert.equal(r.longShort.global.ratio, 3.5);
+        assert.equal(r.takerFlow.read, 'aggressive buyers dominating');
+        assert.ok(r.cautions.some((c) => /crowded long/.test(c)));
+        assert.equal(r.proxySymbol, undefined);
+    });
+
+    it('getPositioning falls back to the USDT twin and tags proxySymbol', async () => {
+        const _deps = deps({
+            'openInterestHist?symbol=BTCUSDC': [],
+            'openInterestHist?symbol=BTCUSDT': OI_ROWS,
+            globalLongShortAccountRatio: [{longShortRatio: '1.1', longAccount: '0.5238', shortAccount: '0.4762', timestamp: 1}],
+            topLongShortPositionRatio: [],
+            takerlongshortRatio: [],
+            klines: genKlines(30, (i) => 60000 - i * 100),
+        });
+        const r = await getPositioning({market: 'futures', symbol: 'BTCUSDC', _deps});
+        assert.equal(r.symbol, 'BTCUSDC');
+        assert.equal(r.proxySymbol, 'BTCUSDT');
+        assert.equal(r.read.quadrant, 'new_shorts'); // price down + OI up
+        assert.ok(r.cautions.some((c) => /proxy/.test(c)));
+        // stats calls after the fallback went to the twin
+        assert.ok(_deps.fetch.calls.some((c) => c.url.includes('globalLongShortAccountRatio') && c.url.includes('BTCUSDT')));
+    });
+
+    it('getSignal positioning:true folds the OI read in as a factor', async () => {
+        const _deps = deps({
+            openInterestHist: OI_ROWS,
+            globalLongShortAccountRatio: [],
+            topLongShortPositionRatio: [],
+            takerlongshortRatio: [],
+            klines: genKlines(300, (i) => 50000 + i * 40 + i * i * 0.5),
+        });
+        const r = await getSignal({market: 'futures', symbol: 'BTCUSDC', positioning: true, _deps});
+        assert.ok(r.positioning);
+        assert.equal(r.positioning.quadrant, 'new_longs');
+        assert.ok(r.reasons.some((x) => /open interest/.test(x)));
+    });
+});
+
+// ── strategy parameter optimization ──────────────────────────────────────────
+describe('optimizeStrategy — parameter grid sweep', () => {
+    // Trending series with cyclical pullbacks — enough structure for crosses to differ by params.
+    const KL = () => genKlines(600, (i) => 50000 + i * 30 + 800 * Math.sin(i / 12));
+
+    it('sweeps the grid, ranks on train only, and judges the winner out-of-sample', async () => {
+        const r = await optimizeStrategy({market: 'futures', symbol: 'BTCUSDC', strategy: 'ema_cross', _deps: deps({klines: KL()})});
+        assert.equal(r.combosTested, 9); // fast [9,12,20] × slow [26,50,100]
+        assert.ok(r.winner.params.fast < r.winner.params.slow);
+        assert.ok(r.winner.train && r.winner.test);
+        assert.ok(r.default.isDefault);
+        assert.deepEqual(r.default.params, {fast: 20, slow: 50});
+        assert.equal(typeof r.selectionEdgePct, 'number');
+        assert.ok(['ROBUST', 'MODERATE', 'WEAK', 'OVERFITTED', 'UNPROFITABLE', 'INCONCLUSIVE', 'INSUFFICIENT_DATA'].includes(r.verdict));
+        // leaderboard is sorted by the train-window score, descending
+        for (let i = 1; i < r.leaderboard.length; i++) {
+            assert.ok((r.leaderboard[i - 1].trainScore ?? -Infinity) >= (r.leaderboard[i].trainScore ?? -Infinity));
+        }
+    });
+
+    it('the default-params combo reproduces the plain backtest behavior', async () => {
+        const rows = KL();
+        const opt = await optimizeStrategy({market: 'futures', symbol: 'BTCUSDC', strategy: 'supertrend', trainRatio: 0.7, _deps: deps({klines: rows})});
+        assert.ok(opt.default);
+        assert.deepEqual(opt.default.params, {period: 10, mult: 3});
+    });
+
+    it('respects valid() constraints and rejects bad inputs', async () => {
+        const r = await optimizeStrategy({market: 'futures', symbol: 'BTCUSDC', strategy: 'macd', _deps: deps({klines: KL()})});
+        assert.ok(r.combosTested === 18 && r.leaderboard.every((x) => x.params.fast < x.params.slow));
+        await assert.rejects(optimizeStrategy({symbol: 'BTCUSDC', strategy: 'nope', _deps: deps()}), /unknown strategy/);
+        await assert.rejects(optimizeStrategy({symbol: 'BTCUSDC', trainRatio: 0.99, _deps: deps()}), /trainRatio/);
+        await assert.rejects(optimizeStrategy({symbol: 'BTCUSDC', _deps: deps({klines: genKlines(100, () => 50000)})}), /not enough candles/);
     });
 });

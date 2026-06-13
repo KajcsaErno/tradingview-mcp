@@ -71,6 +71,21 @@ this is the price of trend-following. Do NOT raise risk past ~2%/trade.
    exact breakouts that pay. REJECTED (input kept, default off). Stopped iterating here to
    avoid curve-fitting.
 
+## v3 experiments (2026-06-11, after the 6y validation)
+
+Tested one-at-a-time on BTCUSDC.P 4h, then validated on BITSTAMP 12h 6y before accepting:
+
+| Experiment | 4h tuning window | 12h 6y out-of-sample | Verdict |
+|---|---|---|---|
+| Breakeven stop at +2R | +54.4%, PF 1.85, DD 12.1% (better everywhere) | +260% vs +274% baseline (neutral) | **KEPT (default on)** |
+| Volume > SMA20 confirmation | +57.2%, PF 1.86 (looked great) | **+133% — halved the baseline** | REJECTED — overfit to Binance perp volume; spot volume is a different signal |
+| ADX rising | identical to baseline | — | REJECTED (no effect) |
+| Chandelier trail (retest w/ pyramid) | +25.4%, PF 1.61, DD 7.3% | — | REJECTED again (worse edge/trade; option for conservative use) |
+
+**Final config adds `breakevenR = 2` to v2. Home-window figures: +54.4% net, PF 1.85,
+maxDD 12.1%, Sortino 1.03, 34 trades.** The volume-filter episode is the canonical
+warning: a 4h-window improvement meant nothing until the 6-year window voted.
+
 ## Out-of-sample: BITSTAMP:BTCUSD, last 6 years (12h, 2020-06-11 → 2026-06-11)
 
 Run 2026-06-11 with the new `Limit backtest range` input (added because Bitstamp's
