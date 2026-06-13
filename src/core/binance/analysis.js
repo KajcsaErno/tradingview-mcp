@@ -3,7 +3,8 @@
 // getTechnicals, the 9-strategy backtester, scanners, and expectancy tools.
 import {requireFinite} from '../../connection.js';
 import {isFuturesLike} from './request.js';
-import {getKlines, KLINE_INTERVALS} from './market.js';
+import {getKlines, getLongShortRatio, getOpenInterestHist, getTakerBuySellRatio, KLINE_INTERVALS} from './market.js';
+import {getMarketEvents} from './sentiment.js';
 
 // ── Trade-math planners (pure, no network) ──────────────────────────────────
 // Forward-looking counterparts to backtestStrategy's backward-looking metrics:
@@ -1149,6 +1150,39 @@ export async function compareStrategies({
     };
 }
 
+/** Score the in-sample [1, splitBar) and out-of-sample [splitBar, n) windows of ONE
+ *  full-series backtest separately. barRets[k] is the return realized on bar k+1, so it
+ *  aligns to closes index k+1. Shared by walkForwardBacktest and optimizeStrategy. */
+function splitWindowMetrics(data, {barRets, trades}, splitBar, interval) {
+    const n = data.closes.length;
+    const window = (lo, hi) => {
+        const rets = barRets.slice(Math.max(0, lo - 1), hi - 1);
+        const eq = rets.reduce((e, r) => e * (1 + r), 1);
+        let peak = 1, mdd = 0;
+        let cur = 1;
+        for (const r of rets) {
+            cur *= 1 + r;
+            if (cur > peak) peak = cur;
+            const dd = cur / peak - 1;
+            if (dd < mdd) mdd = dd;
+        }
+        const tr = trades.filter((t) => t.entryTime >= data.openTimes[lo] && t.entryTime < (hi < n ? data.openTimes[hi] : Infinity));
+        return computeMetrics({barRets: rets, equity: eq, maxDD: mdd, trades: tr, closes: data.closes.slice(lo, hi), interval});
+    };
+    return {train: window(1, splitBar), test: window(splitBar, n)};
+}
+
+/** Overfitting verdict from the out-of-sample vs in-sample annualized-return ratio. */
+function oosVerdict(tr, te) {
+    if (tr == null || te == null) return 'INSUFFICIENT_DATA';
+    if (te <= 0 && tr > 0) return 'OVERFITTED';
+    if (te <= 0) return 'UNPROFITABLE';
+    if (tr <= 0) return 'INCONCLUSIVE';            // test profitable, train wasn't
+    if (te >= 0.5 * tr) return 'ROBUST';
+    if (te >= 0.2 * tr) return 'MODERATE';
+    return 'WEAK';
+}
+
 /**
  * Out-of-sample consistency check (train/test split). Backtests the strategy over the full series
  * once, then scores the in-sample (first `trainRatio`) and out-of-sample (the rest) windows
@@ -1179,37 +1213,12 @@ export async function walkForwardBacktest({
     if (n < 120) throw new Error(`not enough candles for walk-forward (${n}); need at least 120`);
     const bundle = {...data, ind: indicatorBundle(data.highs, data.lows, data.closes)};
     const desired = desiredFor(strat, bundle, allowShort);
-    const {barRets, trades} = runBacktest(data, desired, {commission, slippage, interval});
+    const run = runBacktest(data, desired, {commission, slippage, interval});
 
     const splitBar = Math.floor(n * ratio);          // index into closes/openTimes
     const splitTime = data.openTimes[splitBar];
-    // barRets[k] is the return realized on bar k+1, so it aligns to closes index k+1.
-    const window = (lo, hi) => {
-        const rets = barRets.slice(Math.max(0, lo - 1), hi - 1);
-        const eq = rets.reduce((e, r) => e * (1 + r), 1);
-        let peak = 1, mdd = 0;
-        let cur = 1;
-        for (const r of rets) {
-            cur *= 1 + r;
-            if (cur > peak) peak = cur;
-            const dd = cur / peak - 1;
-            if (dd < mdd) mdd = dd;
-        }
-        const tr = trades.filter((t) => t.entryTime >= data.openTimes[lo] && t.entryTime < (hi < n ? data.openTimes[hi] : Infinity));
-        return computeMetrics({barRets: rets, equity: eq, maxDD: mdd, trades: tr, closes: data.closes.slice(lo, hi), interval});
-    };
-    const train = window(1, splitBar);
-    const test = window(splitBar, n);
-
-    const tr = train.annualizedReturnPct, te = test.annualizedReturnPct;
-    let verdict;
-    if (tr == null || te == null) verdict = 'INSUFFICIENT_DATA';
-    else if (te <= 0 && tr > 0) verdict = 'OVERFITTED';
-    else if (te <= 0) verdict = 'UNPROFITABLE';
-    else if (tr <= 0) verdict = 'INCONCLUSIVE';            // test profitable, train wasn't
-    else if (te >= 0.5 * tr) verdict = 'ROBUST';
-    else if (te >= 0.2 * tr) verdict = 'MODERATE';
-    else verdict = 'WEAK';
+    const {train, test} = splitWindowMetrics(data, run, splitBar, interval);
+    const verdict = oosVerdict(train.annualizedReturnPct, test.annualizedReturnPct);
 
     return {
         success: true, market, symbol: String(symbol).toUpperCase(), interval,
@@ -1217,6 +1226,256 @@ export async function walkForwardBacktest({
         splitTime, verdict,
         train, test,
         note: 'Fixed-parameter train/test consistency check — measures temporal robustness, not parameter-search overfitting.',
+    };
+}
+
+// ── Strategy parameter optimization ──────────────────────────────────────────
+// The search that walkForwardBacktest's note says doesn't exist: sweep a coarse
+// per-strategy parameter grid, rank combos on the TRAIN window only, then judge
+// the winner on the held-out TEST window. Every grid contains the strategy's
+// default parameters, so the sweep always answers "did optimization beat the
+// default out-of-sample?" — if it didn't, the selection added nothing and the
+// default is the honest choice. Grids are deliberately coarse: a finer grid
+// mostly buys more ways to overfit the train window.
+const PARAM_STRATEGIES = {
+    rsi: {
+        grid: {period: [7, 14, 21], buyBelow: [25, 30, 35]},
+        defaults: {period: 14, buyBelow: 30},
+        build: ({closes}, {period, buyBelow}) => {
+            const r = rsiSeries(closes, period);
+            const sellAbove = 100 - buyBelow;
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (r[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                if (r[i] < buyBelow) cur = 1; else if (r[i] > sellAbove) cur = -1;
+                else if (cur === 1 && r[i] >= 50) cur = 0; else if (cur === -1 && r[i] <= 50) cur = 0;
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    bollinger: {
+        grid: {period: [14, 20, 28], mult: [1.5, 2, 2.5]},
+        defaults: {period: 20, mult: 2},
+        build: ({closes}, {period, mult}) => {
+            const {upper, middle, lower} = bollingerSeries(closes, period, mult);
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (middle[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                if (closes[i] < lower[i]) cur = 1; else if (closes[i] > upper[i]) cur = -1;
+                else if (cur === 1 && closes[i] >= middle[i]) cur = 0; else if (cur === -1 && closes[i] <= middle[i]) cur = 0;
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    macd: {
+        grid: {fast: [5, 8, 12], slow: [21, 26, 35], signalP: [5, 9]},
+        defaults: {fast: 12, slow: 26, signalP: 9},
+        valid: (p) => p.fast < p.slow,
+        build: ({closes}, {fast, slow, signalP}) => {
+            const {line, signal} = macdSeries(closes, fast, slow, signalP);
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (line[i] == null || signal[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                cur = dirVs(line[i], signal[i], cur);
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    ema_cross: {
+        grid: {fast: [9, 12, 20], slow: [26, 50, 100]},
+        defaults: {fast: 20, slow: 50},
+        valid: (p) => p.fast < p.slow,
+        build: ({closes}, {fast, slow}) => {
+            const a = emaSeries(closes, fast), b = emaSeries(closes, slow);
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (a[i] == null || b[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                cur = dirVs(a[i], b[i], cur);
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    supertrend: {
+        grid: {period: [7, 10, 14], mult: [2, 3, 4]},
+        defaults: {period: 10, mult: 3},
+        build: ({highs, lows, closes}, {period, mult}) =>
+            supertrendSeries(highs, lows, closes, period, mult).dir.map((d) => (d == null ? 0 : d)),
+    },
+    donchian: {
+        grid: {period: [10, 20, 40, 55]},
+        defaults: {period: 20},
+        build: ({highs, lows, closes}, {period}) => {
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (i < period) {
+                    out[i] = cur;
+                    continue;
+                }
+                let hh = -Infinity, ll = Infinity;
+                for (let j = i - period; j < i; j++) {
+                    if (highs[j] > hh) hh = highs[j];
+                    if (lows[j] < ll) ll = lows[j];
+                }
+                if (closes[i] > hh) cur = 1; else if (closes[i] < ll) cur = -1;
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    rsi_pullback: {
+        grid: {dipBelow: [30, 35, 40, 45], exitAbove: [55, 60, 65]},
+        defaults: {dipBelow: 40, exitAbove: 60},
+        longOnly: true,
+        build: ({closes}, {dipBelow, exitAbove}) => {
+            const r = rsiSeries(closes, 14), s = smaSeries(closes, 200);
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (r[i] == null || s[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                const up = closes[i] > s[i];
+                if (cur === 0 && up && r[i] < dipBelow) cur = 1; else if (cur === 1 && (r[i] > exitAbove || !up)) cur = 0;
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    keltner: {
+        grid: {emaPeriod: [10, 20, 30], mult: [1, 1.5, 2, 2.5]},
+        defaults: {emaPeriod: 20, mult: 1.5},
+        build: ({highs, lows, closes}, {emaPeriod, mult}) => {
+            const e = emaSeries(closes, emaPeriod), a = atrSeries(highs, lows, closes, 14);
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (e[i] == null || a[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                if (closes[i] > e[i] + mult * a[i]) cur = 1; else if (closes[i] < e[i] - mult * a[i]) cur = -1;
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+    triple_ema: {
+        grid: {fast: [9, 12, 20], slow: [50, 100]},
+        defaults: {fast: 20, slow: 50},
+        valid: (p) => p.fast < p.slow,
+        build: ({closes}, {fast, slow}) => {
+            const a = emaSeries(closes, fast), b = emaSeries(closes, slow), s = smaSeries(closes, 200);
+            const out = new Array(closes.length).fill(0);
+            let cur = 0;
+            for (let i = 0; i < closes.length; i++) {
+                if (a[i] == null || b[i] == null || s[i] == null) {
+                    out[i] = cur;
+                    continue;
+                }
+                if (a[i] > b[i] && closes[i] > s[i]) cur = 1; else if (a[i] < b[i] && closes[i] < s[i]) cur = -1; else cur = 0;
+                out[i] = cur;
+            }
+            return out;
+        },
+    },
+};
+
+/** Cartesian product of a {param: [values]} grid → array of {param: value} combos. */
+const gridCombos = (grid) =>
+    Object.entries(grid).reduce((acc, [k, vals]) => acc.flatMap((c) => vals.map((v) => ({...c, [k]: v}))), [{}]);
+
+const sameParams = (a, b) => Object.keys(a).every((k) => a[k] === b[k]);
+
+const OPTIMIZE_SORT_KEYS = new Set(['sharpe', 'calmar', 'totalReturnPct', 'annualizedReturnPct', 'winRatePct', 'profitFactor', 'maxDrawdownPct', 'expectancyPct']);
+
+/**
+ * Grid-sweep one strategy's parameters: rank every combo on the TRAIN window (first
+ * `trainRatio` of the data) by `sortBy`, then judge the train-winner on the held-out TEST
+ * window — selection never sees the test data. Returns the winner with both windows, the
+ * default-parameter result for comparison, `selectionEdgePct` (winner test return minus
+ * default test return — what optimization actually added out-of-sample), an overfitting
+ * verdict on the winner, and a leaderboard. One klines fetch; pure math after that.
+ */
+export async function optimizeStrategy({
+                                           market = 'futures',
+                                           symbol,
+                                           interval = '1h',
+                                           strategy = 'ema_cross',
+                                           limit = 1000,
+                                           trainRatio = 0.7,
+                                           sortBy = 'sharpe',
+                                           commission = 0.0004,
+                                           slippage = 0.0005,
+                                           allowShort = true,
+                                           top = 10,
+                                           _deps = {}
+                                       } = {}) {
+    if (!symbol) throw new Error('symbol is required');
+    const key = String(strategy || '').toLowerCase();
+    const spec = PARAM_STRATEGIES[key];
+    if (!spec) throw new Error(`unknown strategy "${strategy}". Available: ${Object.keys(PARAM_STRATEGIES).join(', ')}`);
+    const ratio = Number(trainRatio);
+    if (!(ratio > 0.1 && ratio < 0.95)) throw new Error('trainRatio must be between 0.1 and 0.95');
+    const sortKey = OPTIMIZE_SORT_KEYS.has(sortBy) ? sortBy : 'sharpe';
+
+    const lim = Math.max(240, Math.min(Number(limit) || 1000, isFuturesLike(market) ? 1500 : 1000));
+    const kl = await getKlines({market, symbol, interval, limit: lim, _deps});
+    const data = ohlcvFull(kl.candles);
+    const n = data.closes.length;
+    if (n < 240) throw new Error(`not enough candles to optimize (${n}); need at least 240 for a meaningful train/test split`);
+    const splitBar = Math.floor(n * ratio);
+
+    const combos = gridCombos(spec.grid).filter(spec.valid || (() => true));
+    const results = combos.map((params) => {
+        let desired = spec.build(data, params);
+        if (spec.longOnly || !allowShort) desired = desired.map((d) => Math.max(0, d ?? 0));
+        const run = runBacktest(data, desired, {commission, slippage, interval});
+        const {train, test} = splitWindowMetrics(data, run, splitBar, interval);
+        return {params, isDefault: sameParams(spec.defaults, params), train, test};
+    });
+
+    // Rank on TRAIN only — the test window must stay out of the selection.
+    const ranked = [...results].sort((a, b) => (b.train[sortKey] ?? -Infinity) - (a.train[sortKey] ?? -Infinity));
+    const winner = ranked[0];
+    const dflt = results.find((r) => r.isDefault);
+    const verdict = oosVerdict(winner.train.annualizedReturnPct, winner.test.annualizedReturnPct);
+
+    return {
+        success: true, market, symbol: String(symbol).toUpperCase(), interval,
+        strategy: key, strategyName: STRATEGIES[key].name, bars: n,
+        trainRatio: ratio, splitTime: data.openTimes[splitBar],
+        combosTested: results.length, sortBy: sortKey,
+        winner, default: dflt, verdict,
+        selectionEdgePct: dflt ? Number((winner.test.totalReturnPct - dflt.test.totalReturnPct).toFixed(2)) : null,
+        leaderboard: ranked.slice(0, Math.max(1, Math.min(Number(top) || 10, results.length))).map((r) => ({
+            params: r.params, ...(r.isDefault ? {isDefault: true} : {}),
+            trainScore: r.train[sortKey], testScore: r.test[sortKey],
+            trainReturnPct: r.train.totalReturnPct, testReturnPct: r.test.totalReturnPct,
+            testMaxDrawdownPct: r.test.maxDrawdownPct, testTrades: r.test.tradeCount,
+        })),
+        note: 'Combos are ranked on the train window only; the test window judges the winner. A negative selectionEdgePct means the default parameters beat the optimized ones out-of-sample — prefer the default. Coarse grid by design: finer grids mostly buy more ways to overfit.',
     };
 }
 
@@ -1438,6 +1697,120 @@ export async function detectCandlestickPatterns({market = 'futures', symbol, int
     };
 }
 
+// ── Open-interest positioning read ───────────────────────────────────────────
+// Price action tells you WHAT moved; open interest tells you WHO is driving it.
+// The four-quadrant read (price direction × OI direction) is the classic
+// futures-market interpretation: rising OI means new money entering on the side
+// of the move (trend supported); falling OI means the move is fueled by
+// position CLOSING (covering/unwinding — prone to fading).
+const OI_QUADRANTS = {
+    new_longs: {score: 1, interpretation: 'price up + OI up — new long money driving the move, uptrend supported'},
+    short_covering: {score: 0.25, interpretation: 'price up + OI down — rally fueled by shorts closing, may fade once covering exhausts'},
+    new_shorts: {score: -1, interpretation: 'price down + OI up — new short money driving the move, downtrend supported'},
+    long_unwind: {score: -0.25, interpretation: 'price down + OI down — selling from longs closing, may exhaust rather than trend'},
+    flat: {score: 0, interpretation: 'no meaningful price or OI change over the window'},
+};
+
+// Kline intervals that are also valid /futures/data statistics periods — getSignal
+// matches the positioning window to its own interval when it can, else falls back to 1h.
+const OI_PERIODS_FOR_SIGNAL = new Set(['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']);
+
+// Below ±0.1% over the window, treat a change as noise rather than direction.
+const FLAT_EPS_PCT = 0.1;
+
+function direction(changePct) {
+    if (changePct > FLAT_EPS_PCT) return 'up';
+    if (changePct < -FLAT_EPS_PCT) return 'down';
+    return 'flat';
+}
+
+function oiQuadrant(priceDir, oiDir) {
+    if (priceDir === 'flat' || oiDir === 'flat') return 'flat';
+    if (priceDir === 'up') return oiDir === 'up' ? 'new_longs' : 'short_covering';
+    return oiDir === 'up' ? 'new_shorts' : 'long_unwind';
+}
+
+/** OI history for the requested symbol, falling back from a USDC pair to its USDT twin
+ *  (the statistics endpoints cover a subset of symbols; the twin is the same market). */
+async function resolveStatsOi({market, symbol, period, limit, _deps}) {
+    let sym = String(symbol).toUpperCase();
+    let oi = await getOpenInterestHist({market, symbol: sym, period, limit, _deps});
+    let proxySymbol;
+    if (!oi.count && sym.endsWith('USDC')) {
+        proxySymbol = sym.replace(/USDC$/, 'USDT');
+        oi = await getOpenInterestHist({market, symbol: proxySymbol, period, limit, _deps});
+        if (oi.count) sym = proxySymbol; else proxySymbol = undefined;
+    }
+    return {sym, oi, proxySymbol};
+}
+
+const lsRatioSummary = (r) => (r && r.count
+    ? {ratio: r.latest.ratio, longPct: Number(r.latest.longPct.toFixed(1)), shortPct: Number(r.latest.shortPct.toFixed(1))}
+    : null);
+
+function takerFlowSummary(taker) {
+    if (!taker || !taker.count) return null;
+    let read = 'balanced';
+    if (taker.latest.buySellRatio > 1) read = 'aggressive buyers dominating';
+    else if (taker.latest.buySellRatio < 1) read = 'aggressive sellers dominating';
+    return {latestBuySellRatio: taker.latest.buySellRatio, avgBuySellRatio: taker.avgBuySellRatio, read};
+}
+
+function positioningCautionList(g, proxySymbol) {
+    const cautions = [];
+    if (g && g.ratio >= 3) cautions.push(`global long/short ratio ${g.ratio} — crowded long, squeeze risk on a breakdown`);
+    if (g && g.ratio > 0 && g.ratio <= 1 / 3) cautions.push(`global long/short ratio ${g.ratio} — crowded short, squeeze risk on a breakout`);
+    if (proxySymbol) cautions.push(`statistics read from ${proxySymbol} as a proxy (requested symbol not covered by /futures/data)`);
+    return cautions;
+}
+
+/**
+ * Composite positioning read for a USD-M futures symbol: open-interest change vs price change
+ * (the four-quadrant "who is driving the move" read), long/short ratios (global retail + top
+ * traders by position size), and the taker buy/sell flow ratio — all off the public
+ * /futures/data statistics endpoints, no chart, no account. If the symbol isn't covered by the
+ * statistics endpoints (USDC pairs often aren't), it automatically retries the USDT twin and
+ * tags the result with `proxySymbol`. Crowding extremes surface as `cautions`.
+ */
+export async function getPositioning({market = 'futures', symbol, period = '1h', limit = 30, _deps = {}} = {}) {
+    if (!symbol) throw new Error('symbol is required');
+    const {sym, oi, proxySymbol} = await resolveStatsOi({market, symbol, period, limit, _deps});
+    if (!oi.count) {
+        return {success: true, market, symbol: sym, period, count: 0, note: oi.note};
+    }
+
+    // Price change over the same window, off klines for the stats symbol (periods are valid kline intervals).
+    const kl = await getKlines({market, symbol: sym, interval: period, limit: Math.max(2, Math.min(Number(limit) || 30, 500)), _deps});
+    const closes = kl.candles.map((c) => Number(c.close));
+    const priceChangePct = closes.length >= 2 && closes[0]
+        ? Number((((closes.at(-1) - closes[0]) / closes[0]) * 100).toFixed(2)) : 0;
+
+    const quadrant = oiQuadrant(direction(priceChangePct), direction(oi.changePct ?? 0));
+    const read = OI_QUADRANTS[quadrant];
+
+    // Ratios are best-effort: an endpoint gap shouldn't sink the OI read.
+    const tryGet = (p) => p.catch(() => null);
+    const [global, topPosition, taker] = await Promise.all([
+        tryGet(getLongShortRatio({market, symbol: sym, kind: 'global', period, limit, _deps})),
+        tryGet(getLongShortRatio({market, symbol: sym, kind: 'topPosition', period, limit, _deps})),
+        tryGet(getTakerBuySellRatio({market, symbol: sym, period, limit, _deps})),
+    ]);
+
+    const g = lsRatioSummary(global);
+    const cautions = positioningCautionList(g, proxySymbol);
+
+    return {
+        success: true, market, symbol: String(symbol).toUpperCase(), ...(proxySymbol ? {proxySymbol} : {}),
+        period, bars: oi.count,
+        openInterest: {latest: oi.latest.openInterest, notionalValue: oi.latest.notionalValue, changePct: oi.changePct, direction: direction(oi.changePct ?? 0)},
+        price: {changePct: priceChangePct, direction: direction(priceChangePct)},
+        read: {quadrant, score: read.score, interpretation: read.interpretation},
+        longShort: {global: g, topPosition: lsRatioSummary(topPosition)},
+        takerFlow: takerFlowSummary(taker),
+        ...(cautions.length ? {cautions} : {}),
+    };
+}
+
 // ── Composite decision signal ────────────────────────────────────────────────
 // Aggregate the indicators getTechnicals already computes into ONE weighted BUY/SELL/HOLD
 // verdict with a -1..1 score, a confidence read, and human-readable reasons — no new data, no
@@ -1526,6 +1899,31 @@ function signalVerdict(score, agreement, cautions) {
     return {signal, strength, confidence};
 }
 
+/** Fold multi-timeframe confluence into the factor list; returns the summary (or {error}). */
+async function foldMtfFactor({market, symbol, factors, _deps}) {
+    try {
+        const m = await getMultiTimeframe({market, symbol, _deps});
+        addFactor(factors, 'mtf_confluence', m.confluence.score, 1, `multi-timeframe ${m.confluence.bias} (${m.confluence.bullish}↑/${m.confluence.bearish}↓ of ${m.timeframes.length})`);
+        return {...m.confluence, timeframes: m.timeframes.map((t) => ({interval: t.interval, trend: t.trend}))};
+    } catch (err) {
+        return {error: err.message};
+    }
+}
+
+/** Fold the OI-positioning quadrant into the factor list (crowding extremes land in
+ *  `cautions`); returns the summary (or {note}/{error} when the data isn't available). */
+async function foldPositioningFactor({market, symbol, interval, factors, cautions, _deps}) {
+    try {
+        const p = await getPositioning({market, symbol, period: OI_PERIODS_FOR_SIGNAL.has(interval) ? interval : '1h', _deps});
+        if (!p.read) return {note: p.note};
+        addFactor(factors, 'oi_positioning', p.read.score, 1, `open interest: ${p.read.interpretation}`);
+        cautions.push(...(p.cautions || []));
+        return {quadrant: p.read.quadrant, interpretation: p.read.interpretation, openInterest: p.openInterest, longShort: p.longShort, ...(p.proxySymbol ? {proxySymbol: p.proxySymbol} : {})};
+    } catch (err) {
+        return {error: err.message};
+    }
+}
+
 // Compact echo of the headline technicals behind a signal.
 const signalTechnicals = (tech) => ({
     rsi: tech.rsi,
@@ -1546,23 +1944,19 @@ const signalTechnicals = (tech) => ({
  * confluence score in as an extra factor (costs a few more klines calls). Pure aggregation — no
  * orders, no new data sources.
  */
-export async function getSignal({market = 'futures', symbol, interval = '1h', limit, mtf = false, _deps = {}} = {}) {
+export async function getSignal({market = 'futures', symbol, interval = '1h', limit, mtf = false, positioning = false, events = false, _deps = {}} = {}) {
     if (!symbol) throw new Error('symbol is required');
     const tech = await getTechnicals({market, symbol, interval, ...(limit == null ? {} : {limit}), _deps});
     const c = tech.lastClose;
     // Trend-following factor set (all share the same +bullish / -bearish convention).
     const factors = collectSignalFactors(tech);
 
-    let mtfSummary = null;
-    if (mtf) {
-        try {
-            const m = await getMultiTimeframe({market, symbol, _deps});
-            mtfSummary = {...m.confluence, timeframes: m.timeframes.map((t) => ({interval: t.interval, trend: t.trend}))};
-            addFactor(factors, 'mtf_confluence', m.confluence.score, 1, `multi-timeframe ${m.confluence.bias} (${m.confluence.bullish}↑/${m.confluence.bearish}↓ of ${m.timeframes.length})`);
-        } catch (err) {
-            mtfSummary = {error: err.message};
-        }
-    }
+    const mtfSummary = mtf ? await foldMtfFactor({market, symbol, factors, _deps}) : null;
+
+    const positioningCautions = [];
+    const positioningSummary = positioning
+        ? await foldPositioningFactor({market, symbol, interval, factors, cautions: positioningCautions, _deps})
+        : null;
 
     // Weighted, normalized score over the factors that were available.
     const totalW = factors.reduce((s, f) => s + f.weight, 0);
@@ -1575,7 +1969,15 @@ export async function getSignal({market = 'futures', symbol, interval = '1h', li
     const agreeW = active.filter((f) => Math.sign(f.score) === sign).reduce((s, f) => s + f.weight, 0);
     const agreement = activeW > 0 ? agreeW / activeW : 0;
 
-    const cautions = buildSignalCautions(tech, factors);
+    // Imminent scheduled macro events never move the score — a squeeze can break either
+    // way on a release — but they should dampen confidence in any pre-event signal.
+    const eventCautions = [];
+    if (events) {
+        const ev = getMarketEvents({daysAhead: 2, _deps});
+        eventCautions.push(...(ev.warning || []).map((w) => `scheduled event: ${w}`));
+    }
+
+    const cautions = [...buildSignalCautions(tech, factors), ...positioningCautions, ...eventCautions];
     const {signal, strength, confidence} = signalVerdict(score, agreement, cautions);
 
     const reasons = factors
@@ -1594,5 +1996,6 @@ export async function getSignal({market = 'futures', symbol, interval = '1h', li
         ...(cautions.length ? {cautions} : {}),
         technicals: signalTechnicals(tech),
         ...(mtfSummary ? {multiTimeframe: mtfSummary} : {}),
+        ...(positioningSummary ? {positioning: positioningSummary} : {}),
     };
 }

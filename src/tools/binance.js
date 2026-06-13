@@ -149,6 +149,32 @@ export function registerBinanceTools(server) {
     limit: z.coerce.number().optional().describe('History rows (default 10, max 1000)'),
     }, core.getFundingRate);
 
+  // ---- Open interest & positioning statistics (public, futures) ----
+  const oiPeriod = z.enum(['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']).default('1h').describe('Statistics bucket period');
+  const oiLimit = z.coerce.number().optional().describe('History rows (default 30, max 500; Binance keeps ~30 days)');
+
+    registerTool(server, 'binance_get_open_interest', 'Current open interest (outstanding contracts) for a futures symbol — a snapshot of total market positioning (public, USD-M or COIN-M)', {
+    market, symbol,
+    }, core.getOpenInterest);
+
+    registerTool(server, 'binance_get_open_interest_hist', 'Historical open interest per period bucket with the % change over the window (public, USD-M only, ~30 days of history). Rising OI = new money entering; falling OI = positions closing. USDC pairs are often not covered — the USDT twin is the standard proxy.', {
+    market, symbol, period: oiPeriod, limit: oiLimit,
+    }, core.getOpenInterestHist);
+
+    registerTool(server, 'binance_get_long_short_ratio', 'Long/short ratio time series (public, USD-M only). kind: global = all accounts (retail sentiment), topAccount = top 20% traders by account count, topPosition = top 20% by position size (smart money). Ratio > 1 = more longs.', {
+    market, symbol, period: oiPeriod, limit: oiLimit,
+    kind: z.enum(['global', 'topAccount', 'topPosition']).default('global').describe('Which cut of the market to read'),
+    }, core.getLongShortRatio);
+
+    registerTool(server, 'binance_get_taker_buy_sell_ratio', 'Taker buy/sell volume ratio time series (public, USD-M only). Ratio > 1 = aggressive market buyers dominating the tape; < 1 = aggressive sellers.', {
+    market, symbol, period: oiPeriod, limit: oiLimit,
+    }, core.getTakerBuySellRatio);
+
+    registerTool(server, 'binance_get_positioning', 'Composite positioning read: open-interest change vs price change (the four-quadrant "who is driving the move" read — new longs / short covering / new shorts / long unwind), long/short ratios (global + top traders by size) and taker buy/sell flow. Public USD-M statistics, no account. USDC symbols auto-fall back to the USDT twin (tagged proxySymbol). The "is this move new money or position closing?" complement to binance_get_signal\'s price-derived factors.', {
+    market, symbol, period: oiPeriod,
+    limit: z.coerce.number().optional().describe('Window length in period buckets (default 30)'),
+    }, core.getPositioning);
+
     registerTool(server, 'binance_get_rolling_window_ticker', 'Rolling-window price-change stats (spot-only). One symbol, or a symbols list to scan a set (Binance has no bare "all" for this endpoint).', {
     market, symbol: symbol.optional(),
     symbols: z.array(z.string()).optional().describe('List of symbols to scan at once'),
@@ -209,6 +235,18 @@ export function registerBinanceTools(server) {
     allowShort: z.boolean().default(true),
     }, core.walkForwardBacktest);
 
+    registerTool(server, 'binance_optimize_strategy', 'Grid-sweep one strategy\'s parameters: rank every combo on the TRAIN window by sortBy, judge the winner on the held-out TEST window (selection never sees test data). Returns winner + default-parameter result, selectionEdgePct (what optimization added out-of-sample — negative means keep the defaults), an overfitting verdict and a leaderboard. The parameter-search companion to binance_walk_forward_backtest. Read-only, no orders.', {
+    market, symbol, interval,
+    strategy: strategy.default('ema_cross'),
+    limit: z.coerce.number().optional().describe('Bars (min 240; default 1000)'),
+    trainRatio: z.coerce.number().optional().describe('In-sample fraction, 0.1–0.95 (default 0.7)'),
+    sortBy: z.enum(['sharpe', 'calmar', 'totalReturnPct', 'annualizedReturnPct', 'winRatePct', 'profitFactor', 'maxDrawdownPct', 'expectancyPct']).default('sharpe').describe('Train-window metric the sweep ranks by'),
+    commission: z.coerce.number().optional(),
+    slippage: z.coerce.number().optional(),
+    allowShort: z.boolean().default(true),
+    top: z.coerce.number().optional().describe('Leaderboard rows (default 10)'),
+    }, core.optimizeStrategy);
+
     registerTool(server, 'binance_get_multi_timeframe', 'Trend/momentum confluence across several timeframes: runs the technicals on each interval and reports whether they agree (bullish/bearish/neutral counts, a -1..1 score, a bias tag, and an aligned flag). Default timeframes 15m/1h/4h/1d.', {
     market, symbol,
     intervals: z.array(z.string()).optional().describe('Timeframes to check, e.g. ["15m","1h","4h","1d"] (default that set)'),
@@ -231,7 +269,30 @@ export function registerBinanceTools(server) {
     market, symbol, interval,
     limit: z.coerce.number().optional().describe('Bars to analyze (min 30; default 300)'),
     mtf: z.boolean().default(false).describe('Also fold in 15m/1h/4h/1d trend confluence as an extra factor'),
+    positioning: z.boolean().default(false).describe('Also fold in the open-interest positioning read (OI vs price quadrant) as an extra factor; crowding extremes become cautions'),
+    events: z.boolean().default(false).describe('Flag imminent scheduled macro events (FOMC/CPI within 2 days) as cautions — they dampen confidence, never flip the call'),
     }, core.getSignal);
+
+  // ---- Equity-curve persistence (actual vs expected drawdown) ----
+    registerTool(server, 'binance_equity_log_append', 'Sample current equity (margin balance incl. unrealized PnL) across accounts and append one JSONL line to the equity log (default strategies/equity-log.jsonl). Run on a schedule to record the ACTUAL equity curve — the counterpart to binance_simulate_equity\'s expected one. Signed read; writes only the local log file.', {
+    market,
+    accounts: z.array(z.string()).default(['1']).describe('Account ids to sample, e.g. ["1","2"]'),
+    file: z.string().optional().describe('Log path (default strategies/equity-log.jsonl, relative to the project root)'),
+    }, core.appendEquityLog);
+
+    registerTool(server, 'binance_equity_log_report', 'Analyze the recorded equity log: total return, max & current drawdown, longest declining streak, per-account returns. Pass expectedMaxDrawdownPct (e.g. the binance_simulate_equity p90 max drawdown) for an actual-vs-expected verdict (WITHIN_EXPECTATION / EXCEEDS_EXPECTATION). Pure math over the local log file.', {
+    file: z.string().optional().describe('Log path (default strategies/equity-log.jsonl)'),
+    expectedMaxDrawdownPct: z.coerce.number().optional().describe('Expected max drawdown % to compare against (sign ignored)'),
+    }, core.analyzeEquityLog);
+
+  // ---- Sentiment & scheduled events ----
+    registerTool(server, 'binance_get_fear_greed', 'Crypto Fear & Greed index (alternative.me, free/keyless — market-wide, BTC-weighted). 0 = extreme fear, 100 = extreme greed; classically read contrarian at the extremes. limit > 1 returns recent daily history.', {
+    limit: z.coerce.number().optional().describe('Days of history (default 1, max 90)'),
+    }, core.getFearGreed);
+
+    registerTool(server, 'binance_get_market_events', 'Upcoming scheduled US macro events that reliably move crypto on the clock: FOMC rate decisions (14:00 ET; dot-plot meetings tagged) and CPI releases (08:30 ET). Static verified 2026 calendar, pure/no network. Check before positioning into a volatility squeeze — compressions often resolve on these releases.', {
+    daysAhead: z.coerce.number().optional().describe('Look-ahead window in days (default 14, max 365)'),
+    }, core.getMarketEvents);
 
   // ---- User-data stream (real-time push of fills/positions/balance) ----
     registerTool(server, 'binance_start_user_stream', 'Open a user-data stream: returns a listenKey + wsUrl for real-time PUSH of order fills, position and balance changes. Connect a WebSocket to wsUrl; refresh with keepalive every ~30 min. (For a ready-made live feed, run the `tv binance user-stream` CLI.)', {

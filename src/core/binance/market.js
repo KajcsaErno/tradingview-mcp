@@ -1,7 +1,7 @@
 // Binance core — public market data (tickers, klines, depth, trades, funding,
 // symbol filters), bounded WS watchers, options surface, and stream builders.
 import {requireFinite} from '../../connection.js';
-import {futPrefix, isFuturesLike, publicRequest, resolveDeps, resolveMarket, snap} from './request.js';
+import {futPrefix, isFutures, isFuturesLike, publicRequest, resolveDeps, resolveMarket, snap} from './request.js';
 
 /** Get recent trades for a symbol (public endpoint, unsigned) */
 export async function getRecentTrades({market = 'futures', symbol, limit = 50, _deps = {}} = {}) {
@@ -296,6 +296,100 @@ export async function getFundingRate({market = 'futures', symbol, history = fals
         lastFundingRate: t.lastFundingRate,
         lastFundingRatePct: t.lastFundingRate == null ? undefined : `${(Number(t.lastFundingRate) * 100).toFixed(4)}%`,
         nextFundingTime: t.nextFundingTime, interestRate: t.interestRate,
+    };
+}
+
+// ── Open interest & positioning statistics (public, futures) ─────────────────
+// Who is positioned how: outstanding contracts (OI), long/short ratios, and
+// aggressive taker flow. The /futures/data/* statistics endpoints are USD-M
+// only, keep ~30 days of history, and cover a subset of symbols — an empty
+// result usually means the symbol isn't tracked (USDC pairs often aren't; the
+// USDT twin is the standard proxy, same underlying market).
+const OI_PERIODS = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d'];
+
+function requireStatsMarket(market, what) {
+    if (!isFutures(market)) throw new Error(`${what} is USD-M futures-only (the /futures/data statistics endpoints have no spot or COIN-M variant)`);
+}
+
+function statsParams(symbol, period, limit, cap = 500) {
+    if (!symbol) throw new Error('symbol is required');
+    if (!OI_PERIODS.includes(period)) throw new Error(`period must be one of: ${OI_PERIODS.join(', ')}`);
+    const lim = Math.max(1, Math.min(Number(limit) || 30, cap));
+    return {symbol: String(symbol).toUpperCase(), period, limit: String(lim)};
+}
+
+const emptyStatsNote = (sym) =>
+    `Binance returned no statistics rows for ${sym} — the /futures/data endpoints cover a subset of symbols. ` +
+    (sym.endsWith('USDC') ? `Try the USDT twin (${sym.replace(/USDC$/, 'USDT')}) as a proxy for the same market.` : 'Try a higher-volume contract.');
+
+/** Current open interest (outstanding contracts) for a futures symbol — USD-M or COIN-M. */
+export async function getOpenInterest({market = 'futures', symbol, _deps = {}} = {}) {
+    if (!isFuturesLike(market)) throw new Error('open interest is futures-only');
+    if (!symbol) throw new Error('symbol is required');
+    const sym = String(symbol).toUpperCase();
+    const data = await publicRequest({market, endpoint: `${futPrefix(market)}/v1/openInterest`, params: {symbol: sym}, _deps});
+    return {success: true, market, symbol: sym, openInterest: Number(data.openInterest), time: data.time};
+}
+
+/** Historical open interest (contracts + notional value) per period bucket. USD-M only, ~30 days. */
+export async function getOpenInterestHist({market = 'futures', symbol, period = '1h', limit = 30, _deps = {}} = {}) {
+    requireStatsMarket(market, 'open-interest history');
+    const params = statsParams(symbol, period, limit);
+    const data = await publicRequest({market, endpoint: '/futures/data/openInterestHist', params, _deps});
+    const rows = (data || []).map((r) => ({
+        openInterest: Number(r.sumOpenInterest), notionalValue: Number(r.sumOpenInterestValue), timestamp: r.timestamp,
+    }));
+    const first = rows[0], last = rows.at(-1);
+    return {
+        success: true, market, symbol: params.symbol, period, count: rows.length,
+        ...(rows.length ? {
+            latest: last,
+            changePct: first && first.openInterest ? Number((((last.openInterest - first.openInterest) / first.openInterest) * 100).toFixed(2)) : null,
+        } : {note: emptyStatsNote(params.symbol)}),
+        history: rows,
+    };
+}
+
+// Ratio flavors: who is long vs short, by three different cuts of the market.
+const LS_RATIO_ENDPOINTS = {
+    global: '/futures/data/globalLongShortAccountRatio',     // all accounts, by count — retail sentiment
+    topAccount: '/futures/data/topLongShortAccountRatio',    // top 20% by margin, by account count
+    topPosition: '/futures/data/topLongShortPositionRatio',  // top 20% by margin, by position size — smart money
+};
+
+/** Long/short ratio time series (USD-M only). `kind`: global (all accounts) |
+ *  topAccount (top traders by count) | topPosition (top traders by size). Ratio > 1 = more longs. */
+export async function getLongShortRatio({market = 'futures', symbol, kind = 'global', period = '1h', limit = 30, _deps = {}} = {}) {
+    requireStatsMarket(market, 'long/short ratio');
+    const endpoint = LS_RATIO_ENDPOINTS[kind];
+    if (!endpoint) throw new Error(`kind must be one of: ${Object.keys(LS_RATIO_ENDPOINTS).join(', ')}`);
+    const params = statsParams(symbol, period, limit);
+    const data = await publicRequest({market, endpoint, params, _deps});
+    const rows = (data || []).map((r) => ({
+        ratio: Number(r.longShortRatio), longPct: Number(r.longAccount) * 100, shortPct: Number(r.shortAccount) * 100, timestamp: r.timestamp,
+    }));
+    const last = rows.at(-1);
+    return {
+        success: true, market, symbol: params.symbol, kind, period, count: rows.length,
+        ...(rows.length ? {latest: last} : {note: emptyStatsNote(params.symbol)}),
+        history: rows,
+    };
+}
+
+/** Taker buy/sell volume ratio time series (USD-M only). Ratio > 1 = aggressive buyers dominating. */
+export async function getTakerBuySellRatio({market = 'futures', symbol, period = '1h', limit = 30, _deps = {}} = {}) {
+    requireStatsMarket(market, 'taker buy/sell ratio');
+    const params = statsParams(symbol, period, limit);
+    const data = await publicRequest({market, endpoint: '/futures/data/takerlongshortRatio', params, _deps});
+    const rows = (data || []).map((r) => ({
+        buySellRatio: Number(r.buySellRatio), buyVol: Number(r.buyVol), sellVol: Number(r.sellVol), timestamp: r.timestamp,
+    }));
+    const last = rows.at(-1);
+    const avg = rows.length ? rows.reduce((s, r) => s + r.buySellRatio, 0) / rows.length : null;
+    return {
+        success: true, market, symbol: params.symbol, period, count: rows.length,
+        ...(rows.length ? {latest: last, avgBuySellRatio: Number(avg.toFixed(4))} : {note: emptyStatsNote(params.symbol)}),
+        history: rows,
     };
 }
 
@@ -787,17 +881,20 @@ export async function getOptionsSurface({underlying = 'BTCUSDT', expirations, fu
 // counterpart to the bounded watchPrice. buildMarketStream() builds the combined-stream URL
 // (`/stream?streams=a@trade/b@bookTicker/…`) and is pure/DI-testable like startUserStream;
 // the actual WS loop lives in the `tv binance market-stream` CLI subcommand. Unsigned/public.
-const PUBLIC_STREAM_KINDS = new Set(['trade', 'aggTrade', 'ticker', 'bookTicker', 'kline', 'markPrice', 'funding']);
+const PUBLIC_STREAM_KINDS = new Set(['trade', 'aggTrade', 'ticker', 'bookTicker', 'kline', 'markPrice', 'funding', 'forceOrder', 'allForceOrder']);
+const FUTURES_ONLY_KINDS = new Set(['markPrice', 'funding', 'forceOrder', 'allForceOrder']);
 
 /** Map one stream spec → its Binance suffix. Specs are a kind, optionally `kind:arg`
  *  (only `kline:<interval>` uses the arg, defaulting to 1m). On futures, the `markPrice`
  *  stream already carries the funding rate + next funding time, so `funding` is an alias
- *  for it. markPrice/funding are futures-only. */
+ *  for it. `forceOrder` is the symbol's liquidation-order stream; `allForceOrder` is the
+ *  market-wide `!forceOrder@arr` feed (symbol-independent — a `!`-prefixed return value is
+ *  a complete stream name, not a suffix). markPrice/funding/liquidations are futures-only. */
 function streamSuffix(spec, market) {
     const [kind, arg] = String(spec).trim().split(':');
     if (!PUBLIC_STREAM_KINDS.has(kind))
-        throw new Error(`unknown stream "${spec}" (use trade, aggTrade, ticker, bookTicker, kline[:1m], markPrice, funding)`);
-    if ((kind === 'markPrice' || kind === 'funding') && !isFuturesLike(market))
+        throw new Error(`unknown stream "${spec}" (use trade, aggTrade, ticker, bookTicker, kline[:1m], markPrice, funding, forceOrder, allForceOrder)`);
+    if (FUTURES_ONLY_KINDS.has(kind) && !isFuturesLike(market))
         throw new Error(`${kind} stream is futures-only`);
     switch (kind) {
         case 'trade':
@@ -813,6 +910,10 @@ function streamSuffix(spec, market) {
         case 'markPrice':
         case 'funding':
             return '@markPrice@1s';
+        case 'forceOrder':
+            return '@forceOrder';
+        case 'allForceOrder':
+            return '!forceOrder@arr';
     }
 }
 
@@ -832,8 +933,11 @@ export function buildMarketStream({market = 'futures', symbols, streams = 'trade
     if (!streamList.length) throw new Error('streams is required (e.g. "trade,bookTicker,markPrice")');
     const subscriptions = [];
     for (const sym of symList)
-        for (const spec of streamList)
-            subscriptions.push(`${sym.toLowerCase()}${streamSuffix(spec, m)}`);
+        for (const spec of streamList) {
+            const part = streamSuffix(spec, m);
+            // '!'-prefixed = a complete market-wide stream name (e.g. !forceOrder@arr), not a per-symbol suffix.
+            subscriptions.push(part.startsWith('!') ? part : `${sym.toLowerCase()}${part}`);
+        }
     const uniq = [...new Set(subscriptions)];
     return {
         success: true, market: m, symbols: symList, streams: streamList,
@@ -878,6 +982,15 @@ export function formatMarketEvent(msg) {
             closed: k.x,
             openTime: k.t,
             closeTime: k.T
+        };
+    }
+    if (e === 'forceOrder') {
+        // A SELL liquidation order force-closes a LONG position (and vice versa).
+        const o = d.o || {};
+        return {
+            event: 'liquidation', symbol: o.s, liquidated: o.S === 'SELL' ? 'LONG' : 'SHORT',
+            side: o.S, qty: Number(o.q), price: Number(o.ap || o.p),
+            notional: Number((Number(o.q) * Number(o.ap || o.p)).toFixed(2)), time: o.T || d.E,
         };
     }
     if (e === 'bookTicker' || (d.b !== undefined && d.a !== undefined && d.s))

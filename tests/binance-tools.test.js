@@ -696,9 +696,9 @@ describe('formatMarketEvent', () => {
     });
 
     it('falls back to {event,stream,raw} for unrecognized events', () => {
-        const e = formatMarketEvent({stream: 'btcusdc@forceOrder', data: {e: 'forceOrder', o: {}}});
-        assert.equal(e.event, 'forceOrder');
-        assert.equal(e.stream, 'btcusdc@forceOrder');
+        const e = formatMarketEvent({stream: 'btcusdc@compositeIndex', data: {e: 'compositeIndex', p: '1'}});
+        assert.equal(e.event, 'compositeIndex');
+        assert.equal(e.stream, 'btcusdc@compositeIndex');
         assert.ok(e.raw);
     });
 });
@@ -769,5 +769,31 @@ describe('testnet switch', () => {
                 if (v === undefined) delete process.env[k]; else process.env[k] = v;
             }
         }
+    });
+});
+
+// ── forceOrder (liquidation) streams ─────────────────────────────────────────
+describe('liquidation streams (forceOrder / allForceOrder)', () => {
+    it('forceOrder subscribes per symbol; allForceOrder is the market-wide name (deduped)', () => {
+        const r = buildMarketStream({market: 'futures', symbols: 'BTCUSDC,ETHUSDC', streams: 'forceOrder,allForceOrder'});
+        assert.deepEqual(r.subscriptions, ['btcusdc@forceOrder', '!forceOrder@arr', 'ethusdc@forceOrder']);
+        assert.match(r.wsUrl, /streams=btcusdc@forceOrder\/!forceOrder@arr\/ethusdc@forceOrder$/);
+    });
+
+    it('liquidation streams are futures-only', () => {
+        assert.throws(() => buildMarketStream({market: 'spot', symbols: 'BTCUSDT', streams: 'forceOrder'}), /futures-only/);
+        assert.throws(() => buildMarketStream({market: 'spot', symbols: 'BTCUSDT', streams: 'allForceOrder'}), /futures-only/);
+    });
+
+    it('formatMarketEvent normalizes a forceOrder event and names the liquidated side', () => {
+        const msg = {stream: 'btcusdc@forceOrder', data: {e: 'forceOrder', E: 100, o: {s: 'BTCUSDC', S: 'SELL', q: '0.5', p: '60000', ap: '59950', X: 'FILLED', T: 99}}};
+        assert.deepEqual(formatMarketEvent(msg), {
+            event: 'liquidation', symbol: 'BTCUSDC', liquidated: 'LONG', side: 'SELL',
+            qty: 0.5, price: 59950, notional: 29975, time: 99,
+        });
+        // BUY force-order closes a SHORT
+        const short = formatMarketEvent({data: {e: 'forceOrder', o: {s: 'BTCUSDC', S: 'BUY', q: '1', p: '60000', T: 1}}});
+        assert.equal(short.liquidated, 'SHORT');
+        assert.equal(short.price, 60000); // falls back to p when ap is absent
     });
 });

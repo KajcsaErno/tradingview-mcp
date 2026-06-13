@@ -24,7 +24,7 @@ const server = new McpServer(
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-      instructions: `TradingView MCP — 150 tools: 82 for reading and controlling a live TradingView Desktop chart, plus 68 for direct Binance trading (separate module, no chart needed).
+      instructions: `TradingView MCP — 161 tools: 82 for reading and controlling a live TradingView Desktop chart, plus 79 for direct Binance trading (separate module, no chart needed).
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -62,11 +62,14 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
-Binance trading — 68 tools (direct API, NOT via TradingView; needs BINANCE_API_KEY/SECRET in env or .env):
+Binance trading — 79 tools (direct API, NOT via TradingView; needs BINANCE_API_KEY/SECRET in env or .env):
 - Reads: binance_get_balance, binance_get_positions, binance_get_open_orders, binance_get_account_summary, binance_get_risk_report, binance_get_order_history, binance_get_income
 - Market data (public, no keys): binance_get_ticker, binance_get_klines, binance_get_order_book, binance_get_symbol_info, binance_get_24hr_ticker (all:true = screener), binance_compare_symbols, binance_watch_price
-- Technical analysis (computed off klines, no chart): binance_get_technicals (RSI/ATR/MACD/SMA/EMA/BB/VWAP), binance_get_signal (composite BUY/SELL/HOLD), binance_get_multi_timeframe (confluence), binance_scan_signals (screen a list), binance_detect_candlestick_patterns, binance_correlate_symbols
-- Backtesting (no orders): binance_backtest_strategy (9 strategies, Sharpe/Calmar/drawdown), binance_compare_strategies (rank all 9), binance_walk_forward_backtest (overfitting check)
+- Positioning (public, USD-M): binance_get_positioning (OI-vs-price quadrant: who is driving the move), binance_get_open_interest(_hist), binance_get_long_short_ratio, binance_get_taker_buy_sell_ratio
+- Sentiment & events: binance_get_fear_greed (crypto Fear & Greed index), binance_get_market_events (upcoming FOMC/CPI — check before trading into a squeeze)
+- Technical analysis (computed off klines, no chart): binance_get_technicals (RSI/ATR/MACD/SMA/EMA/BB/VWAP), binance_get_signal (composite BUY/SELL/HOLD; mtf/positioning/events flags fold in more evidence), binance_get_multi_timeframe (confluence), binance_scan_signals (screen a list), binance_detect_candlestick_patterns, binance_correlate_symbols
+- Backtesting (no orders): binance_backtest_strategy (9 strategies, Sharpe/Calmar/drawdown), binance_compare_strategies (rank all 9), binance_walk_forward_backtest (overfitting check), binance_optimize_strategy (parameter grid sweep, judged out-of-sample)
+- Equity tracking: binance_equity_log_append (record an equity sample), binance_equity_log_report (actual vs expected drawdown)
 - Sizing & trade math (pure calc): binance_calc_position_size (entry+stop+risk budget → qty), binance_calc_expectancy, binance_estimate_losing_streak, binance_simulate_equity (Monte Carlo)
 - Config: binance_set_leverage, binance_set_margin_type, binance_set_position_mode (futures)
 - Orders: binance_place_order, binance_place_bracket (entry+stop+TPs), binance_place_ladder (scale-in rungs), binance_modify_order, binance_ensure_protective_stop, binance_cancel_order, binance_cancel_all_orders, binance_mirror_order/binance_mirror_bracket (multi-account), binance_transfer
